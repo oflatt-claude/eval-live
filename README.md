@@ -1,10 +1,56 @@
 # eval-live
 
-Interactive HTML tables and Pyodide-powered graphs for evaluation results.
-Renders JSON data as filterable, collapsible tables with optional in-browser
-Python graphs and computed summary tables. The same table and graph definitions
-also render to the terminal and to files (PDF / JSON / LaTeX), so results look
-consistent across the web, the CLI, and dumps.
+eval-live is an opinionated way to run paper evaluations. A paper evaluation
+should be a single Python script that generates all the figures, LaTeX macros,
+tables, and other artifacts the paper needs. With no arguments, that script
+runs the entire evaluation. Command-line arguments change parameters or select
+subsets of the work.
+
+All command-line arguments, including their defaults, belong with the data so
+that results can be reproduced. All evaluation data should be stored as flat
+tables in a single output file, with one row per observation and explicit
+columns identifying the commit and configuration.
+
+The workflow starts with a list of figures, tables, and macros. Each
+artifact declares the data it needs: perhaps one commit and configuration, or
+several for a comparison. eval-live determines the required benchmark runs,
+reuses cached results identified by commit and command-line configuration,
+collects missing data, and generates the paper artifacts and an interactive
+webpage from the same definitions.
+
+`Evaluation`, `Benchmark`, and `RunRequest` provide collection, exact caching,
+and dependency planning. `Figure`, `Table`, and `Macros` declare paper outputs.
+The existing `Registry` API remains available for rendering already-collected
+data. See the [Python guide](docs/python-guide.rst),
+[data format](docs/data-format.rst), and [original design plan](docs/refactor-plan.rst).
+
+## Demo and Python documentation
+
+The [top-level demo](demo/README.md) is a small, runnable paper evaluation using
+the full evaluation API, including comparisons across two local Git commits:
+
+```bash
+pip install -e '.[render]'
+python demo/eval.py
+```
+
+Open `demo/out/paper/index.html` for the interactive report. Its Python graphs and
+computed tables load Pyodide and matplotlib from a CDN; raw tables work without
+that runtime. The demo writes all data to `demo/out/paper/results.json` and
+paper artifacts alongside it. Run it again to reuse cached observations;
+`--samples 5` fills missing samples, `--only summary` selects a subset, and
+`--dry-run` explains required work without running it. `--render-only` regenerates
+outputs from saved sample selections without the benchmark repository.
+
+The [Python documentation](docs/index.rst) includes a tutorial, data and filter
+contracts, and API reference generated from docstrings. Build it locally with:
+
+```bash
+pip install -e '.[docs]'
+python -m sphinx -W --keep-going -b html docs docs/_build/html
+```
+
+Then open `docs/_build/html/index.html`.
 
 ## Install
 
@@ -58,8 +104,8 @@ reg.table("Summary", summary_fn, filter_source=summary_filter_fn)
 eval_live.registry = reg
 ```
 
-See `eval_live/eval_live.py` for full documentation on graphs, tables, and
-filter propagation.
+See the [Python guide](docs/python-guide.rst) and
+[API reference](docs/api.rst) for graphs, tables, and filter propagation.
 
 ## Rendering to the terminal and disk
 
@@ -157,7 +203,19 @@ Pure-JS unit + DOM-smoke tests, no npm/jsdom (they run the browser modules in a
 ```bash
 node test/state.test.mjs   # state core: filtering, reducers, SQL-clause helpers
 node test/dom.test.mjs      # initEvalLive end-to-end: filter / collapse / checkbox / clear
+node test/graph-engine.test.mjs  # Pyodide conversion boundary: graphs / tables / narrowing
+python test/test_registry.py
+python -m unittest discover -s test -p 'test_*.py'
 ```
 
-The AlaSQL row-evaluation path and the Pyodide engine are exercised in the
-browser, not in these tests.
+The AlaSQL row-evaluation path and the actual Pyodide runtime are exercised in
+the browser; the engine unit test uses a small runtime stub.
+
+CI also builds the Python docs and runs the demo with real Pyodide in Chromium.
+To run that browser check locally after generating the default demo:
+
+```bash
+pip install playwright
+python -m playwright install chromium
+python test/browser_smoke.py
+```

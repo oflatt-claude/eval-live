@@ -64,11 +64,22 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
     pyodide.globals.set("__eval_live_data__", pyodide.toPy(filteredData));
   }
 
+  // Computed presentation cells may contain nested text/style dictionaries.
+  // Convert those too, so the DOM receives ordinary objects at every depth.
+  function plainValue(value) {
+    if (value instanceof Map) {
+      return Object.fromEntries(Array.from(value, ([key, item]) => [key, plainValue(item)]));
+    }
+    return Array.isArray(value) ? value.map(plainValue) : value;
+  }
+
   async function runGraphs(filteredData) {
     setData(filteredData);
     const proxy = await pyodide.runPythonAsync(
       "import eval_live; eval_live.registry.run_graphs(__eval_live_data__)");
-    const raw = proxy.toJs({ create_proxies: false });
+    // Explicitly preserve the Map representation consumed below, independent
+    // of the Pyodide version's default conversion for string-keyed dicts.
+    const raw = proxy.toJs({ create_pyproxies: false, dict_converter: (entries) => new Map(entries) });
     proxy.destroy();
     return raw.map((g) => ({ name: g.get("name"), src: g.get("src") }));
   }
@@ -77,11 +88,11 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
     setData(filteredData);
     const proxy = await pyodide.runPythonAsync(
       "import eval_live; eval_live.registry.run_tables(__eval_live_data__)");
-    const raw = proxy.toJs({ create_proxies: false });
+    const raw = proxy.toJs({ create_pyproxies: false, dict_converter: (entries) => new Map(entries) });
     proxy.destroy();
     return raw.map((t) => ({
       name: t.get("name"),
-      rows: t.get("rows").map((r) => Object.fromEntries(r.entries())),
+      rows: t.get("rows").map(plainValue),
       hasFilterSource: t.get("has_filter_source"),
       caption: t.get("caption"),
     }));
@@ -92,12 +103,12 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
     pyodide.globals.set("__eval_live_table_filters__", pyodide.toPy(tableFilters));
     const proxy = await pyodide.runPythonAsync(
       "import eval_live; eval_live.registry.apply_table_filters(__eval_live_table_filters__, __eval_live_data__)");
-    const result = proxy.toJs({ create_proxies: false });
+    const result = proxy.toJs({ create_pyproxies: false, dict_converter: (entries) => new Map(entries) });
     proxy.destroy();
     const out = {};
     for (const [k, v] of result.entries()) {
       out[k] = Array.isArray(v)
-        ? v.map((r) => (r instanceof Map ? Object.fromEntries(r.entries()) : r))
+        ? v.map(plainValue)
         : v;
     }
     return out;

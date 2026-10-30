@@ -1,2 +1,5 @@
-eval_live/__pycache__/
+__pycache__/
 *.egg-info/
+.venv/
+docs/_build/
+demo/out/
