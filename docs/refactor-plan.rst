@@ -11,6 +11,11 @@ examples are in :doc:`python-guide` and :doc:`api`. JSON containing named flat
 tables is the chosen storage format. Parallel execution, full dirty-source
 snapshots, and hosted documentation remain outside this first version.
 
+The timeout policy below reflects the subsequent request to follow
+`egglog-encoding PR #151
+<https://github.com/saulshanabrook/egglog-encoding/pull/151>`_: deadlines are
+recorded with observations but excluded from their measurement identity.
+
 The author writes one Python entry point. Running it with no arguments
 produces every paper figure, table, macro, and an interactive HTML report.
 Arguments change parameters or select artifacts and benchmark subsets. A
@@ -174,8 +179,9 @@ Cache and execution semantics
   flags, toolchain, and dependency locks so an exact cache hit can avoid a build.
 * Store **all** CLI options. Use only explicitly declared execution parameters
   for a reusable observation's configuration. Artifact selection, output path,
-  and display format do not change a measurement. Timeout, seed, build options,
-  and concurrency that affects measurement do. Unknown paper parameters are
+  and display format do not change a measurement. Seed, build options,
+  and concurrency that affects measurement do. Timeout is a separate retry
+  bound, recorded on each attempt. Unknown paper parameters are
   measurement-affecting by default; exclusions must be explicit.
 * Sample count is a requirement, not a measurement parameter. Raising it from
   three to five reuses three samples and collects two. Equivalent requests
@@ -184,8 +190,10 @@ Cache and execution semantics
 * Failed, timed-out, or interrupted attempts remain in the file with their
   diagnostics. They never count as successful samples. Stop further samples
   of that failed request during the invocation, continue independent requests,
-  and exit nonzero when required data is incomplete. A later invocation can
-  retry missing samples; a force option collects fresh attempts without
+  and exit nonzero when required data is incomplete. Increasing the timeout
+  retries timed-out work and preserves successes. Cached timeouts at an equal
+  or smaller bound and ordinary failures block retries; a force option
+  collects fresh attempts without
   deleting history. Render dependent artifacts only when their requirements
   are satisfied unless they explicitly support incomplete data.
 * Default reusable collection uses clean committed targets. Explicitly allowed

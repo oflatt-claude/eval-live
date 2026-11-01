@@ -46,6 +46,15 @@ Force runs retain previous attempts and selections. Failed/timed-out samples
 never count toward successful sample requirements. A run left in ``running``
 state by a stopped process becomes ``interrupted`` when the next writer starts.
 
+``eval_runs.timeout`` is the per-command deadline used for that attempt. It
+does not participate in cache identity: raising the deadline preserves successes
+and permits retries of timed-out work. Equal/smaller deadlines keep cached
+timeouts blocking; ordinary failures require ``--force``. For a smaller limit,
+a success is reused only if its recorded ``seconds`` fits; this total attempt
+duration includes setup/build work. Prior observations are never relabeled
+with a later deadline. Early schema-1 files whose cache keys included timeout
+remain readable and reusable without rewriting their observations.
+
 Persistence
 -----------
 

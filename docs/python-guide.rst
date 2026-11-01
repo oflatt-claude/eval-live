@@ -164,7 +164,7 @@ A shared data file can be used with another artifact directory:
 
 Cache identity includes repository identity, full SHA, measurement callback
 and declared helper code, explicit protocol version, configuration, declared
-input hashes, environment/tool metadata, and timeout. Changing plot code or
+input hashes, and environment/tool metadata. Changing plot code or
 labels does not invalidate observations. Sample count is a minimum: raising
 three to five collects two more. ``--force`` appends fresh attempts without
 deleting old results. Exact selected sample IDs are stored for every artifact.
@@ -175,8 +175,39 @@ allowed benchmark names; it errors if that would remove a required dependency.
 or measured commands. Collection is sequential. Failed attempts stop further
 samples for that request, while independent requests continue. Failures remain
 in the data file and raise ``CollectionError`` after complete independent
-outputs are rendered. Later runs retry missing samples. Interrupted attempts
-are recorded, and completed observations survive restarts.
+outputs are rendered. Interrupted attempts are recorded and can be retried;
+completed observations survive restarts.
+
+Timeouts and retries
+--------------------
+
+Set a benchmark's per-command deadline with ``Benchmark(timeout=60)``. The
+shared ``--timeout`` option overrides it for all selected benchmarks, including
+build commands. Timeouts kill the command's process group on POSIX and record
+the attempt as ``timed-out`` with its stdout/stderr. Arbitrary Python callbacks
+are not preempted; run bounded work through ``context.command``.
+
+.. code-block:: bash
+
+   python demo/eval.py --timeout 10
+   python demo/eval.py --timeout 60  # reuse successes; retry timed-out work
+
+Timeout is a retry bound, separate from measurement identity. Increasing it
+keeps successful observations and makes timed-out requests eligible to collect
+their missing samples. The newest applicable attempts satisfy the requested
+sample count; older successes can fill it after a timeout becomes inapplicable.
+An equal or smaller limit leaves cached timeouts blocked. Ordinary failures
+also block automatic retries; ``--force`` collects fresh attempts regardless
+of the cache. Changing the benchmark's default timeout follows the same rule
+as changing the CLI option.
+
+Successes are reusable at an equal or larger deadline. For a smaller deadline,
+the saved total attempt duration must fit. That duration includes setup and
+build time, so this check is conservative. Each attempt retains its original
+deadline, status, and duration; the new invocation records the requested limit
+separately. A dry-run displays the effective deadline and any cached failures
+blocking collection. If timeout changes the algorithm itself, also put that
+algorithm parameter in the request configuration.
 
 Re-render a saved evaluation
 --------------------------------------------

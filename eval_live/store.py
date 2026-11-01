@@ -151,6 +151,7 @@ class Store:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser().resolve()
         self._writing = False
+        self._run_keys: dict[str, str] = {}
         self.reload()
 
     def reload(self) -> None:
@@ -225,6 +226,7 @@ class Store:
                     raise ValueError(f"dangling run in {table}")
                 if table not in SYSTEM_TABLES and "run_id" not in row:
                     raise ValueError(f"missing run_id in {table}")
+        run_keys = {}
         for row in self.data["eval_runs"]:
             if row["config_id"] not in configs or row["environment_id"] not in environments:
                 raise ValueError("run has no configuration or environment")
@@ -246,12 +248,16 @@ class Store:
             if row["status"] == "success" and (type(row["seconds"]) not in (int, float) or row["seconds"] < 0):
                 raise ValueError("successful run must have a duration")
             inputs = inputs_by_run.get(row["run_id"], [])
-            expected = digest({"repository": row["repository"], "commit": row["commit"],
-                               "dirty": row["dirty"], "benchmark": row["benchmark"],
-                               "runner": row["runner_id"], "config": row["config_id"], "inputs": inputs,
-                               "environment": row["environment_id"], "timeout": row["timeout"]})
-            if row["cache_key"] != expected:
+            identity = {"repository": row["repository"], "commit": row["commit"],
+                        "dirty": row["dirty"], "benchmark": row["benchmark"],
+                        "runner": row["runner_id"], "config": row["config_id"], "inputs": inputs,
+                        "environment": row["environment_id"]}
+            expected = digest(identity)
+            # Early schema-1 files included the deadline in the stored key.
+            # Index them by the new identity without rewriting observations.
+            if row["cache_key"] not in (expected, digest({**identity, "timeout": row["timeout"]})):
                 raise ValueError("cache identity does not match run provenance")
+            run_keys[row["run_id"]] = expected
         for row in self.data["eval_selections"]:
             run = run_by_id[row["run_id"]]
             if run["status"] != "success":
@@ -271,6 +277,7 @@ class Store:
             for positions in groups.values():
                 if any(type(p) is not int for p in positions) or sorted(positions) != list(range(len(positions))):
                     raise ValueError(f"invalid or duplicate positions in {table}")
+        self._run_keys = run_keys
 
     @contextmanager
     def writer(self) -> Iterator[Store]:
@@ -312,7 +319,29 @@ class Store:
         self.validate()
         atomic_write(self.path, json.dumps(self.data, indent=2, allow_nan=False) + "\n")
 
-    def cached(self, cache_key: str) -> list[dict]:
-        """Return successful reusable observations in persistent attempt order."""
+    def runs(self, cache_key: str) -> list[dict]:
+        """Return all attempts for an identity, including legacy deadline keys."""
         return [row for row in self.data["eval_runs"]
-                if row["cache_key"] == cache_key and row["cacheable"] and row["status"] == "success"]
+                if row["cache_key"] == cache_key or self._run_keys.get(row["run_id"]) == cache_key]
+
+    def cached(self, cache_key: str, *, timeout: float | None = None) -> list[dict]:
+        """Return applicable cached observations in persistent attempt order.
+
+        Without a deadline, return successes only. With ``timeout``, also
+        retain ordinary failures and timeouts at an equal or larger recorded
+        deadline: they block collection until forced or the bound increases.
+        A success fits an equal/longer deadline, or a shorter one if its total
+        recorded attempt duration fits. Running/interrupted attempts never block.
+        Callers take the newest requested number of these applicable rows.
+        """
+        eligible = []
+        for row in self.runs(cache_key):
+            if not row["cacheable"]:
+                continue
+            if row["status"] == "success":
+                if timeout is None or row["timeout"] <= timeout or row["seconds"] <= timeout:
+                    eligible.append(row)
+            elif timeout is not None and (row["status"] == "failure" or
+                    (row["status"] == "timed-out" and timeout <= row["timeout"])):
+                eligible.append(row)
+        return eligible

@@ -110,6 +110,10 @@ class Benchmark:
     Optional ``build(context) -> Path`` receives ``build_config`` and runs once
     per target/build identity. The resulting binary is ``context.binary`` in
     measurement callbacks. Use ``context.command`` to capture process details.
+
+    ``timeout`` is the per-command deadline in seconds, overridden by the CLI
+    ``--timeout`` option. Increasing it retries cached timeouts while preserving
+    successful observations. It does not preempt arbitrary Python callbacks.
     """
 
     name: str

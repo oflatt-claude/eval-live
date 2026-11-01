@@ -2,6 +2,7 @@
 
 Run: python -m unittest discover -s test -p 'test_evaluation.py'
 """
+import argparse
 import json
 from pathlib import Path
 import subprocess
@@ -12,7 +13,7 @@ from unittest.mock import patch
 
 import eval_live
 from eval_live.benchmarks import ProcessInterrupted, ProcessResult
-from eval_live.store import atomic_write, parameter_rows, read_parameters
+from eval_live.store import atomic_write, digest, parameter_rows, read_parameters
 
 CALLS = []
 BUILDS = []
@@ -30,6 +31,13 @@ def collect(context):
 def slow(context):
     context.command([sys.executable, "-c", "import time; time.sleep(30)"])
     return {}
+
+
+def timed_collect(context):
+    CALLS.append((context.commit, dict(context.config), context.sample))
+    if context.config.get("delayed") or (context.config.get("after_first") and context.sample > 0):
+        context.command([sys.executable, "-c", "import time; time.sleep(0.1)"])
+    return {"measurements": [{"value": 20, "sample": context.sample}]}
 
 
 def build(context):
@@ -221,6 +229,111 @@ class EvaluationTests(unittest.TestCase):
             self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", invalid, "1")))
         self.assertNotIn("measurements", self.stored())
 
+    def test_increasing_timeout_reuses_successes_and_retries_only_timeouts(self):
+        benchmark = eval_live.Benchmark("read", timed_collect, "1")
+        artifacts = [eval_live.Table("fast", {"data": self.request()}, table),
+                     eval_live.Table("slow", {"data": self.request(delayed=True)}, table)]
+        evaluation = self.evaluation(artifacts=artifacts, benchmark=benchmark)
+        with self.assertRaises(eval_live.CollectionError):
+            self.run_eval(evaluation, timeout=0.01)
+        original = self.stored()["eval_runs"]
+        self.assertEqual([row["status"] for row in original], ["success", "timed-out"])
+        result = self.run_eval(evaluation, timeout=5)
+        self.assertEqual((result.reused, result.collected), (1, 1))
+        self.assertEqual([config for _, config, _ in CALLS], [{}, {"delayed": True}, {"delayed": True}])
+        data = self.stored()
+        self.assertEqual(data["eval_runs"][:2], original)
+        self.assertEqual([row["timeout"] for row in data["eval_runs"]], [0.01, 0.01, 5])
+        self.assertEqual(data["eval_runs"][1]["cache_key"], data["eval_runs"][2]["cache_key"])
+        arguments = read_parameters([row for row in data["eval_arguments"] if row["invocation_id"] == result.invocation_id])
+        self.assertEqual(arguments["timeout"], 5)
+        evaluation = self.evaluation(artifacts=artifacts,
+                                     benchmark=eval_live.Benchmark("read", timed_collect, "1", timeout=10))
+        result = self.run_eval(evaluation)
+        self.assertEqual((result.reused, result.collected), (2, 0))
+
+    def test_cached_timeout_blocks_equal_or_smaller_deadlines_and_force_overrides(self):
+        evaluation = self.evaluation(self.request(delayed=True),
+                                     benchmark=eval_live.Benchmark("read", timed_collect, "1", timeout=0.01))
+        with self.assertRaises(eval_live.CollectionError):
+            self.run_eval(evaluation)
+        for deadline in (0.01, 0.005):
+            with self.assertRaisesRegex(eval_live.CollectionError, "cached timed-out"):
+                self.run_eval(evaluation, timeout=deadline)
+        self.assertEqual(len(CALLS), 1)
+        plan = self.run_eval(evaluation, timeout=0.01, dry_run=True).plan
+        self.assertEqual(plan.missing, 0)
+        self.assertIn("blocked by cached timed-out", plan.describe())
+        with self.assertRaises(eval_live.CollectionError):
+            self.run_eval(evaluation, timeout=0.01, force=True)
+        self.assertEqual(len(CALLS), 2)
+
+    def test_timeout_retry_collects_only_the_remaining_sample_deficit(self):
+        evaluation = self.evaluation(self.request(after_first=True, samples=3),
+                                     benchmark=eval_live.Benchmark("read", timed_collect, "1"))
+        with self.assertRaises(eval_live.CollectionError):
+            self.run_eval(evaluation, timeout=0.01)
+        result = self.run_eval(evaluation, timeout=5)
+        self.assertEqual((result.reused, result.collected), (1, 2))
+        self.assertEqual([sample for _, _, sample in CALLS], [0, 1, 2, 3])
+        self.assertEqual(len(self.stored()["eval_selections"]), 3)
+
+    def test_raising_timeout_can_reuse_older_successes_without_retrying(self):
+        evaluation = self.evaluation(self.request(delayed=True, samples=2),
+                                     benchmark=eval_live.Benchmark("read", timed_collect, "1"))
+        original = self.run_eval(evaluation, timeout=5)
+        with self.assertRaises(eval_live.CollectionError):
+            self.run_eval(evaluation, timeout=0.01, force=True)
+        result = self.run_eval(evaluation, timeout=5)
+        self.assertEqual((result.reused, result.collected), (2, 0))
+        self.assertEqual(len(CALLS), 3)
+        data = self.stored()
+        def selected(invocation):
+            return [row["run_id"] for row in data["eval_selections"] if row["invocation_id"] == invocation]
+
+        self.assertEqual(selected(original.invocation_id), selected(result.invocation_id))
+
+    def test_increased_timeout_does_not_retry_ordinary_failures(self):
+        evaluation = self.evaluation(self.request(fail=True))
+        with self.assertRaises(eval_live.CollectionError):
+            self.run_eval(evaluation)
+        with self.assertRaisesRegex(eval_live.CollectionError, "cached failure"):
+            self.run_eval(evaluation, timeout=600)
+        self.assertEqual(len(CALLS), 1)
+        with self.assertRaises(eval_live.CollectionError):
+            self.run_eval(evaluation, timeout=600, force=True)
+        self.assertEqual(len(CALLS), 2)
+
+    def test_legacy_timeout_keys_are_reused_without_rewriting_observations(self):
+        self.run_eval()
+        data = self.stored()
+        row = data["eval_runs"][0]
+        row["cache_key"] = digest({
+            "repository": row["repository"], "commit": row["commit"], "dirty": row["dirty"],
+            "benchmark": row["benchmark"], "runner": row["runner_id"], "config": row["config_id"],
+            "inputs": [{"path": item["path"], "sha256": item["sha256"]} for item in data["eval_inputs"]],
+            "environment": row["environment_id"], "timeout": row["timeout"],
+        })
+        self.data.write_text(json.dumps(data))
+        result = self.run_eval(timeout=600)
+        self.assertEqual((result.reused, result.collected), (1, 0))
+        self.assertEqual(self.stored()["eval_runs"][0], row)
+        result = self.run_eval(self.evaluation(self.request(samples=2)), timeout=600)
+        self.assertEqual((result.reused, result.collected), (1, 1))
+        self.assertEqual([run["sample"] for run in self.stored()["eval_runs"]], [0, 1])
+
+    def test_timeout_cli_and_programmatic_validation(self):
+        parser = eval_live.add_arguments(argparse.ArgumentParser())
+        self.assertIsNone(parser.parse_args([]).timeout)
+        self.assertEqual(parser.parse_args(["--timeout", "0.5"]).timeout, 0.5)
+        for token in ("0", "-1", "inf", "nan", "abc"):
+            with patch("sys.stderr"), self.assertRaises(SystemExit):
+                parser.parse_args(["--timeout", token])
+        for deadline in (0, -1, float("inf"), float("nan"), True):
+            with self.assertRaises(ValueError):
+                self.run_eval(timeout=deadline)
+        self.assertFalse(self.output.exists())
+
     def test_mutating_materialized_inputs_cannot_produce_a_cache_hit(self):
         benchmark = eval_live.Benchmark("read", mutate_input, "1", inputs=["value.txt"])
         with self.assertRaisesRegex(eval_live.CollectionError, "inputs changed"):
@@ -308,6 +421,24 @@ class EvaluationTests(unittest.TestCase):
 
 
 class StoreTests(unittest.TestCase):
+    def test_cached_deadline_eligibility(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = eval_live.Store(Path(temporary) / "results.json")
+            store.data["eval_runs"] = [
+                dict(run_id="fast", cache_key="key", cacheable=True, status="success", timeout=10, seconds=2),
+                dict(run_id="overhead", cache_key="key", cacheable=True, status="success", timeout=10, seconds=12),
+                dict(run_id="timeout", cache_key="key", cacheable=True, status="timed-out", timeout=10, seconds=10),
+                dict(run_id="error", cache_key="key", cacheable=True, status="failure", timeout=10, seconds=1),
+                dict(run_id="interrupted", cache_key="key", cacheable=True, status="interrupted", timeout=10, seconds=1),
+            ]
+            def select(deadline):
+                return [row["run_id"] for row in store.cached("key", timeout=deadline)]
+
+            self.assertEqual(select(10), ["fast", "overhead", "timeout", "error"])
+            self.assertEqual(select(11), ["fast", "overhead", "error"])
+            self.assertEqual(select(2), ["fast", "timeout", "error"])
+            self.assertEqual(select(1), ["timeout", "error"])
+
     def test_parameters_roundtrip_and_invalid_values(self):
         for value in ({}, {"a": []}, {"a": None}, {"a": [1, "x", False, None, 1.0]}):
             self.assertEqual(read_parameters(parameter_rows(value)), value)

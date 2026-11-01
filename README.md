@@ -41,6 +41,9 @@ paper artifacts alongside it. Run it again to reuse cached observations;
 `--samples 5` fills missing samples, `--only summary` selects a subset, and
 `--dry-run` explains required work without running it. `--render-only` regenerates
 outputs from saved sample selections without the benchmark repository.
+`--timeout 60` sets a per-command deadline in seconds. Increasing it reuses
+successful samples and retries timed-out work; `--force` also retries ordinary
+failures. Each attempt retains the deadline it actually used.
 
 The [Python documentation](docs/index.rst) includes a tutorial, data and filter
 contracts, and API reference generated from docstrings. Build it locally with:

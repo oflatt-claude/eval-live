@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from argparse import Namespace
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import inspect
+import math
 from pathlib import Path
 import platform
 import sys
@@ -42,11 +43,12 @@ class PlannedRun:
     samples: int
     selected: list[dict] = field(default_factory=list)
     needed_by: list[str] = field(default_factory=list)
+    blocked: dict | None = None
 
     @property
     def missing(self) -> int:
-        """Number of additional successful observations required."""
-        return max(0, self.samples - len(self.selected))
+        """Number of additional observations eligible for collection."""
+        return 0 if self.blocked else max(0, self.samples - len(self.selected))
 
 
 @dataclass
@@ -69,8 +71,13 @@ class Plan:
         """Explain required runs, cache hits, and the artifacts needing them."""
         lines = [f"{len(self.artifacts)} artifacts; {self.reused} cached samples; {self.missing} missing samples"]
         for run in self.runs.values():
+            blocked = ""
+            if run.blocked:
+                remedy = "increase --timeout or use --force" if run.blocked["status"] == "timed-out" else "use --force"
+                blocked = f"; blocked by cached {run.blocked['status']} ({remedy})"
             lines.append(f"  {run.benchmark.name}@{run.target.commit[:12]} {run.config!r}: "
-                         f"{len(run.selected)} cached, {run.missing} missing; needed by {', '.join(run.needed_by)}")
+                         f"{len(run.selected)} cached, {run.missing} missing; timeout {run.benchmark.timeout:g}s; "
+                         f"needed by {', '.join(run.needed_by)}{blocked}")
         return "\n".join(lines)
 
 
@@ -130,8 +137,11 @@ class Evaluation:
     def _options(args: Namespace | Mapping | None) -> dict:
         supplied = vars(args) if isinstance(args, Namespace) else dict(args or {})
         options = dict(output="out", data=None, only=None, benchmarks=None, force=False,
-                       dry_run=False, render_only=False, invocation=None, allow_dirty=False)
+                       dry_run=False, render_only=False, invocation=None, allow_dirty=False, timeout=None)
         options.update(parameters(supplied))
+        timeout = options["timeout"]
+        if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("timeout must be a finite positive number of seconds")
         if options["render_only"] and (options["force"] or options["dry_run"]):
             raise ValueError("--render-only cannot be combined with --force or --dry-run")
         if options["invocation"] and not options["render_only"]:
@@ -181,6 +191,8 @@ class Evaluation:
                     if allowed is not None and request.benchmark not in allowed:
                         raise ValueError(f"benchmark subset excludes {request.benchmark!r}, required by {artifact.id}")
                     benchmark = self.benchmarks[request.benchmark]
+                    if options["timeout"] is not None:
+                        benchmark = replace(benchmark, timeout=options["timeout"])
                     target_key = (str(request.repository), request.commit)
                     if target_key not in targets:
                         targets[target_key] = Target.resolve(request.repository, request.commit,
@@ -200,7 +212,7 @@ class Evaluation:
                     key = digest({"repository": target.identity, "commit": target.commit,
                                   "dirty": target.dirty, "benchmark": benchmark.name,
                                   "runner": runner_id, "config": config_id, "inputs": inputs,
-                                  "environment": environment_id, "timeout": benchmark.timeout})
+                                  "environment": environment_id})
                     if key not in plan.runs:
                         plan.runs[key] = PlannedRun(key, benchmark, target, config, measurement_args,
                                                    environment, inputs, config_id, environment_id,
@@ -211,7 +223,9 @@ class Evaluation:
                     if reason not in run.needed_by:
                         run.needed_by.append(reason)
                     if not target.dirty and not options["force"]:
-                        run.selected = store.cached(key)[-run.samples:]
+                        cached = store.cached(key, timeout=benchmark.timeout)[-run.samples:]
+                        run.selected = [row for row in cached if row["status"] == "success"]
+                        run.blocked = next((row for row in reversed(cached) if row["status"] != "success"), None)
                     requirements[key] = max(requirements.get(key, 0), request.samples)
                 plan.requirements[artifact.id][name] = list(requirements.items())
         return plan
@@ -253,12 +267,18 @@ class Evaluation:
             directories = {}
             binaries = {}
             for planned in plan.runs.values():
+                if planned.blocked:
+                    prior = planned.blocked
+                    remedy = "increase --timeout or use --force" if prior["status"] == "timed-out" else "use --force to retry"
+                    errors.append(f"{planned.benchmark.name}@{planned.target.commit[:12]}: cached {prior['status']} "
+                                  f"at {prior['timeout']:g}s; {remedy}. {prior['error'] or ''}")
+                    continue
                 if not planned.missing:
                     continue
                 self._register_run_metadata(store, planned)
                 benchmark, target = planned.benchmark, planned.target
                 for _ in range(planned.missing):
-                    sample = max((r["sample"] for r in store.data["eval_runs"] if r["cache_key"] == planned.key), default=-1) + 1
+                    sample = max((r["sample"] for r in store.runs(planned.key)), default=-1) + 1
                     row = dict(run_id=str(uuid.uuid4()), invocation_id=invocation["invocation_id"],
                                cache_key=planned.key, cacheable=not target.dirty, benchmark=benchmark.name,
                                repository=target.identity, requested_ref=target.ref, commit=target.commit,
@@ -335,7 +355,8 @@ class Evaluation:
         selections = {}
         for artifact in plan.artifacts:
             requirements = plan.requirements[artifact.id]
-            if any(len(plan.runs[key].selected) < count for requests in requirements.values() for key, count in requests):
+            if any(plan.runs[key].blocked or len(plan.runs[key].selected) < count
+                   for requests in requirements.values() for key, count in requests):
                 continue
             ready.append(artifact)
             selections[artifact.id] = {}

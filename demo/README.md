@@ -31,6 +31,7 @@ python demo/eval.py --dry-run
 python demo/eval.py --samples 5
 python demo/eval.py --only summary --sizes 500 2000
 python demo/eval.py --seed 42
+python demo/eval.py --timeout 60
 python demo/eval.py --force
 python demo/eval.py --render-only
 python demo/eval.py --help
@@ -42,6 +43,12 @@ use `--invocation ID` to choose a complete run. No benchmark repository is
 needed for render-only use. Use `--data PATH` to share a cache across artifact
 output directories. Every option and its default is recorded, even options
 that do not affect measurement identity.
+
+`--timeout` overrides the benchmark's per-command deadline in seconds. If a
+command times out, raise the limit and run again: completed samples are reused
+and only the missing samples are collected. Repeating an equal or smaller
+limit leaves cached timeouts blocked. Use `--force` to retry anyway, including
+ordinary failures. Attempts keep their original deadlines and diagnostics.
 
 Open the HTML directly. Filter Summary by `algorithm = 'set' AND size = 500`
 to narrow observations and recompute graphs. Raw tables work without network

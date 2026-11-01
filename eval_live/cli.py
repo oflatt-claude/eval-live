@@ -1,12 +1,13 @@
 """Shared CLI options for ordinary Python paper-evaluation scripts."""
 from argparse import ArgumentParser, ArgumentTypeError
+import math
 from pathlib import Path
 
 # These affect selection/output rather than individual measurements. All are
 # still saved in eval_arguments, including defaults.
 CONTROL_ARGUMENTS = frozenset({
     "output", "data", "only", "benchmarks", "samples", "commit", "baseline",
-    "force", "dry_run", "render_only", "invocation", "allow_dirty",
+    "force", "dry_run", "render_only", "invocation", "allow_dirty", "timeout",
 })
 
 
@@ -15,6 +16,14 @@ def positive_int(value: str) -> int:
     result = int(value)
     if result <= 0:
         raise ArgumentTypeError("must be positive")
+    return result
+
+
+def positive_seconds(value: str) -> float:
+    """Parse a finite, positive subprocess deadline in seconds."""
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise ArgumentTypeError("must be a finite positive number of seconds")
     return result
 
 
@@ -31,6 +40,8 @@ def add_arguments(parser: ArgumentParser, *, output: str | Path = "out") -> Argu
     parser.add_argument("--benchmarks", nargs="+", default=None, metavar="BENCHMARK", help="allowed benchmark names")
     parser.add_argument("--samples", type=positive_int, default=3, help="required samples per request")
     parser.add_argument("--commit", default="HEAD", help="target commit/ref, or WORKTREE")
+    parser.add_argument("--timeout", type=positive_seconds, default=None, metavar="SECONDS",
+                        help="per-command deadline (default: each Benchmark.timeout); increasing it retries cached timeouts")
     parser.add_argument("--force", action="store_true", help="collect fresh observations, retaining history")
     parser.add_argument("--dry-run", action="store_true", help="show the plan without builds or writes")
     parser.add_argument("--render-only", action="store_true", help="render a saved invocation without Git or collection")
