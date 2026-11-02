@@ -4,8 +4,7 @@ Paper evaluation refactor plan
 Status and scope
 ----------------
 
-This document preserves the design and implementation sequence agreed before
-the refactor. The store, benchmark runner, cache, planner, artifact exports,
+This document records the design and implementation sequence for the refactor. The store, benchmark runner, cache, planner, registry exports,
 demo, and Python documentation are now implemented. The current contracts and
 examples are in :doc:`python-guide` and :doc:`api`. JSON containing named flat
 tables is the chosen storage format. Parallel execution, full dirty-source
@@ -15,6 +14,10 @@ The timeout policy below reflects the subsequent request to follow
 `egglog-encoding PR #151
 <https://github.com/saulshanabrook/egglog-encoding/pull/151>`_: deadlines are
 recorded with observations but excluded from their measurement identity.
+
+The public API extends the original Registry. Benchmarks, graphs, tables, and
+macros share one catalog and ordinary data-dictionary callbacks; collection
+remains a private runner behind ``Registry.run``.
 
 The author writes one Python entry point. Running it with no arguments
 produces every paper figure, table, macro, and an interactive HTML report.
@@ -62,61 +65,49 @@ tables, filtering, and local rendering, but assumed data was already collected.
 It had no execution or persistence layer. Its browser core is deliberately
 small enough to load as one Python module under Pyodide.
 
-Proposed public model
----------------------
+Public model
+------------
 
-Keep the initial API to a few concepts, with names still open to refinement:
-
-``Benchmark``
-   A stable name, an explicit implementation version, declared input files,
-   and a callable that collects one observation as named flat tables. A
-   subprocess helper supplies timeouts, exit status, stdout/stderr, and timing.
-   An optional build callback prepares a target once.
+``Registry``
+   The script's benchmark definitions and ordered output catalog. The existing
+   ``graph(name, fn)`` and ``table(name, fn, filter_source=...)`` methods accept
+   optional ``requires=``. Add ``benchmark`` and ``macros`` registrations,
+   ``plan`` to inspect work, and ``run`` to collect, checkpoint, and render.
+   Ordinary argparse remains the CLI. Existing renderers still accept data
+   supplied by the caller.
 
 ``RunRequest``
    Benchmark, repository, commit/ref, resolved configuration, and required
    sample count. Resolve refs to full SHAs before looking up observations.
-   Requests are immutable after resolution.
+   Requests are immutable after resolution. ``requires`` accepts one request,
+   a sweep, or a mapping of named requirements.
 
-``Figure``, ``Table``, ``Macros``
-   A stable ID, display name, named requirements, and a render callback. A
-   requirement can name one run or multiple runs, including different commits
-   and configurations. Artifact IDs also determine collision-checked filenames.
+``select(data, name)``
+   Pick one named requirement from the dictionary passed to an output callback.
+   Without this helper, a callback sees the union of its required observations.
+   Filters retain the original ``filter_source(rows, data) -> data`` contract.
 
-``Evaluation``
-   The script's benchmark definitions and ordered artifact catalog. It builds
-   a plan, collects missing data, then renders. Plain ``argparse`` remains a
-   supported way to define paper-specific CLI options.
-
-Original API sketch (see the Python guide for complete runnable examples):
+Example (see the Python guide and demo for complete runnable scripts):
 
 .. code-block:: python
 
-   baseline = RunRequest(
-       benchmark="membership", repository=".", commit=args.baseline,
-       config={"algorithm": "list", "size": args.size, "seed": args.seed},
-       samples=args.samples,
-   )
-   candidate = RunRequest(
-       benchmark="membership", repository=".", commit=args.commit,
-       config={"algorithm": "set", "size": args.size, "seed": args.seed},
-       samples=args.samples,
-   )
-   artifacts = [
-       Figure("runtime", requires={"candidate": candidate}, render=runtime),
-       Table("comparison", requires={"baseline": baseline,
-                                     "candidate": candidate}, render=compare),
-       Macros("paper-numbers", requires={"baseline": baseline,
-                                         "candidate": candidate}, render=numbers),
-   ]
-   evaluation = Evaluation(benchmarks=[membership_benchmark], artifacts=artifacts)
-   evaluation.run(args=args, argv=argv)  # default selection: every artifact
+   reg = Registry(selection_arguments=["sizes"])
+   reg.benchmark("membership", membership, version="1", inputs=["membership.py"])
+   baseline = RunRequest("membership", commit=args.baseline,
+                         config={"algorithm": "set"}, samples=args.samples)
+   candidate = RunRequest("membership", commit=args.commit,
+                          config={"algorithm": "set"}, samples=args.samples)
+   reg.graph("Runtime", runtime, requires=candidate)
+   reg.table("Comparison", compare,
+             requires={"baseline": baseline, "candidate": candidate})
+   reg.macros("Paper numbers", numbers, requires=candidate)
+   reg.run(args=args, argv=argv)
 
-Each render callback receives a view of precisely its named requirements,
-including their selected sample IDs. Single-run callbacks get the same named
-table shape used today; comparison callbacks access explicitly named views
-such as baseline and candidate. An adapter will let existing ``Registry``
-callbacks consume these views. Do not infer dependencies by executing plots.
+Register outputs directly; no separate Evaluation or Figure/Table/Macros
+classes are needed. The same catalog is used for planning, files, terminal
+rendering, and the browser. Benchmark code is imported lazily so the browser
+still uses a standalone Python module. Do not infer dependencies by executing
+plots.
 
 Storage and reproducibility
 ---------------------------
@@ -259,7 +250,7 @@ Implementation sequence and acceptance checks
    behavior. Persist the exact reused/fresh sample IDs for later rendering.
 
 5. **Unify paper and browser generation.** Add a local HTML writer, macro
-   renderer, and Registry adapter. Render all formats from the same selected
+   renderer, and Registry rendering. Render all formats from the same selected
    data. Validate macro names and escape values, check filename collisions,
    and support empty filtered data. Keep the browser runtime free of execution
    imports. Test browser filtering and compare computed numbers with local
@@ -282,7 +273,7 @@ Implementation sequence and acceptance checks
    separate publishing decision; the local build should always work.
 
 Proposed module boundaries are ``store.py``, ``benchmarks.py``, ``targets.py``,
-``planning.py``, ``artifacts.py``, and ``cli.py``. Keep
+``planning.py``, ``render.py``, and ``cli.py``. Keep
 ``eval_live/eval_live.py`` as the browser-compatible rendering core while the
 local package re-exports the new API. Introduce each module when its phase
 needs it, rather than scaffolding the whole design first.

@@ -1,27 +1,43 @@
 Migrating existing Registry scripts
 ===================================
 
-The original ``Registry``, ``css()``, ``js()``, ``pyodide_lib()``, terminal
-renderer, and ``render_to_dir`` remain available. Existing callbacks taking a
-data dictionary continue to work. The new workflow is additive.
+Keep your registry, graph/table callbacks, and filters. The same ``Registry``
+now handles collection and caching. Existing ``css()``, ``js()``,
+``pyodide_lib()``, terminal rendering, and ``render_to_dir`` remain available.
+There is no separate evaluation object or artifact class to construct.
 
 To adopt collection and caching:
 
-1. Move collection into ``Benchmark.run(context)`` and return named flat tables.
-   Split repeated samples and nested timing summaries into rows. Declare inputs,
-   helper dependencies, tool versions, and measurement parameters.
-2. Replace orchestration with an ordered list of ``Figure``, ``Table``, and
-   ``Macros`` definitions. Give each output explicit named ``RunRequest``
-   requirements. Existing single-scope callbacks can be adapted with a named
-   wrapper that calls ``old_callback(view.data)``.
-   Artifact filter callbacks return matching run IDs; the legacy Registry's
-   filter callbacks continue to return narrowed data dictionaries.
+1. Register a callback with ``reg.benchmark(name, collect, version=..., ...)``.
+   It returns named flat tables. Split repeated samples and nested timing
+   summaries into rows, and declare inputs, helper dependencies, tool versions,
+   and measurement parameters.
+2. Add ``requires=`` to existing ``reg.graph`` and ``reg.table`` calls. It takes
+   a ``RunRequest``, a list, or named requirements for comparisons. Callbacks
+   still receive ``data``; filters still return narrowed data dictionaries.
 3. Use ``add_arguments`` with ordinary argparse options and pass resolved args
-   plus original tokens to ``Evaluation.run``. Put collection/API construction
-   inside ``main`` and guard execution for browser imports.
-4. Let ``Evaluation`` persist one JSON file and generate the HTML and paper
-   artifacts. The new export path does not produce per-table JSON sidecars;
-   legacy ``Registry.render_to_dir`` retains its existing behavior.
+   plus original tokens to ``reg.run``. Guard execution inside ``main`` for
+   browser imports; registration itself does not run benchmarks.
+4. Let ``reg.run`` persist one JSON file and generate HTML and paper artifacts.
+   It writes no per-table JSON sidecars; ``reg.render_to_dir(data, path)`` keeps
+   its existing behavior when rendering data you supply.
+
+For example, only registration and execution change for an existing callback:
+
+.. code-block:: python
+
+   def summary(data):
+       return [{"samples": len(data["measurements"])}]
+
+   reg = eval_live.Registry()
+   reg.benchmark("worker", collect, version="1", inputs=["worker.py"])
+   reg.table("Summary", summary,
+             requires=eval_live.RunRequest("worker", samples=args.samples))
+   reg.run(args=args, argv=tokens)
+
+Use ``reg.macros`` for paper numbers. For cross-commit comparisons, name the
+requirements and call ``eval_live.select(data, "baseline")`` inside the
+callback. Explicit ``id=`` values keep filenames stable when titles change.
 
 Old arbitrary raw JSON remains loadable in the standalone viewer. It is not a
 valid new cache: commit, configuration, and selection provenance cannot be

@@ -10,17 +10,17 @@ from statistics import median
 import eval_live
 
 
-def timings(view):
+def timings(data):
     groups = defaultdict(list)
-    for row in view.data["timings"]:
+    for row in data["timings"]:
         groups[row["file"], row["treatment"]].append(row["seconds"])
     return [{"file": file, "treatment": treatment, "samples": len(values),
              "median_ms": round(median(values) * 1000, 4)}
             for (file, treatment), values in sorted(groups.items())]
 
 
-def numbers(view):
-    return {"EgglogSamples": len(view.data["timings"])}
+def numbers(data):
+    return {"EgglogSamples": len(data["timings"])}
 
 
 def prebuilt(context):
@@ -68,22 +68,18 @@ def main(argv=None):
     tokens = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(tokens)
     binary = args.binary.expanduser().resolve()
-    benchmarks = [eval_live.Benchmark(
-        file, measure, version="1", build=prebuilt, build_config={"binary": str(binary)},
-        inputs=[file, binary], environment={"RUST_LOG": "error"},
-    ) for file in args.files]
+    reg = eval_live.Registry(selection_arguments=["files", "treatments", "repository", "binary"],
+                             browser_source=Path(__file__), title="Egglog evaluation")
+    for file in args.files:
+        reg.benchmark(file, measure, version="1", build=prebuilt, build_config={"binary": str(binary)},
+                      inputs=[file, binary], environment={"RUST_LOG": "error"})
     requests = [eval_live.RunRequest(file, repository=str(args.repository), commit=args.commit,
                                     config={"file": file, "treatment": treatment}, samples=args.samples)
                 for file in args.files for treatment in args.treatments]
-    evaluation = eval_live.Evaluation(
-        benchmarks=benchmarks,
-        artifacts=[eval_live.Table("timings", {"runs": requests}, timings, title="Egglog timings"),
-                   eval_live.Macros("numbers", {"runs": requests}, numbers, title="Paper numbers")],
-        selection_arguments=["files", "treatments", "repository", "binary"],
-        browser_source=Path(__file__), title="Egglog evaluation",
-    )
+    reg.table("Egglog timings", timings, requires={"runs": requests}, id="timings")
+    reg.macros("Paper numbers", numbers, requires={"runs": requests}, id="numbers")
     try:
-        result = evaluation.run(args=args, argv=tokens)
+        result = reg.run(args=args, argv=tokens)
     except (ValueError, RuntimeError) as error:
         print(error, file=sys.stderr)
         return 1

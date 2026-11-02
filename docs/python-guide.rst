@@ -32,8 +32,8 @@ rather than constituting a rigorous performance study.
 Declare benchmark observations
 ------------------------------
 
-A ``Benchmark`` callback receives a ``RunContext`` and returns named flat
-user tables. Each call represents one observation. The library adds
+A callback registered with ``reg.benchmark`` receives a ``RunContext`` and
+returns named flat user tables. Each call represents one observation. The library adds
 ``run_id`` to every returned row and joins it to commit, configuration,
 status, and environment metadata. Use scalar cells; repeated values belong
 in separate rows. Tables beginning with ``eval_`` and the ``run_id`` column
@@ -49,9 +49,8 @@ are reserved.
        ])
        return {"measurements": [json.loads(result.stdout)]}
 
-   benchmark = eval_live.Benchmark(
-       "worker", collect, version="1", inputs=["worker.py"], timeout=60,
-   )
+   reg = eval_live.Registry()
+   reg.benchmark("worker", collect, version="1", inputs=["worker.py"], timeout=60)
 
 ``context.directory`` is the requested Git revision in a temporary detached
 worktree. ``context.config`` holds the request parameters; ``context.sample``
@@ -62,8 +61,8 @@ exit code, stdout, and stderr. Nonzero exits and timeouts raise
 are not preempted. ``run_command`` exposes the same helper separately, without
 automatic persistence.
 
-Declare all measurement helpers in ``Benchmark(dependencies=[...])`` and
-external input files/directories in ``inputs``. Relative inputs are read at
+Declare measurement helpers with ``reg.benchmark(..., dependencies=[...])``
+and external input files/directories in ``inputs``. Relative inputs are read at
 the target commit; absolute inputs are hashed from the local filesystem.
 Declare toolchain/dependency versions with ``tools`` and environment variables
 with ``environment``. If behavior depends on undeclared global values or
@@ -71,8 +70,8 @@ external services, explicitly version those dependencies or include them in
 configuration. The library cannot infer their identity from callback source.
 
 An optional ``build(context) -> Path`` prepares a binary. It receives
-``Benchmark.build_config`` as its configuration; measurement callbacks receive
-their own request configuration. Builds are shared across requests with the
+the registered ``build_config`` as its configuration; measurement callbacks
+receive their own request configuration. Builds are shared across requests with the
 same target, build code/configuration, inputs, and environment. The binary is
 available as ``context.binary`` and its hash is saved. An entirely cached run
 performs no build or worktree creation.
@@ -95,46 +94,75 @@ collection requires ``--allow-dirty`` and is never reusable.
    >>> candidate.config["size"]
    100
 
-Each artifact names one or more requirements. A requirement may contain one
-request or a list, such as all sizes in a sweep. The planner deduplicates
-identical requests, taking the maximum sample count needed across outputs.
+Keep the original registration style. Add ``requires=`` to declare the data
+an output needs. It accepts one request, a list of requests, or a dictionary
+of named requirements. The planner deduplicates identical requests, taking
+the maximum sample count needed across outputs.
 
 .. code-block:: python
 
-   def timings(view):
-       return view.data["measurements"]
+   def timings(data):
+       return data["measurements"]
 
-   table = eval_live.Table("timings", requires={"candidate": candidate}, render=timings)
+   reg.table("Timings", timings, requires=candidate)
+   reg.run(args=args, argv=tokens)
 
-Callbacks receive an ``ArtifactView``. ``view["candidate"]`` returns tables
-restricted to the selected samples, including ``eval_runs`` and
-``eval_configs`` for provenance. ``view.data`` is shorthand for an artifact
-with exactly one named requirement. Rows are copied so callbacks do not alter
-the stored snapshot.
+Callbacks still receive ordinary dictionaries of named flat tables. During
+``reg.run``, those tables contain only the observations selected for that
+output, with duplicates removed. ``eval_runs`` and ``eval_configs`` provide
+provenance; ``eval_selections`` identifies each named requirement by
+``requirement`` and ``run_id``. These callback selection rows describe this
+output alone. Rows are copied so rendering cannot change the stored snapshot.
+
+A graph callback returns a matplotlib Figure; a table callback returns a list
+of row dictionaries, including the existing styled presentation cells.
+``reg.macros(name, fn, requires=...)`` registers a callback returning a mapping
+from LaTeX macro names (letters only) to scalar values. Values are escaped;
+duplicate macro names across selected outputs are errors.
+
+The display name's slug determines filenames and ``--only`` IDs: ``"Runtime
+comparison"`` becomes ``runtime-comparison``. Set ``id="runtime"`` explicitly
+to keep filenames stable when renaming a display title. IDs must be unique
+and contain only letters, digits, underscores, or hyphens.
+
+For comparisons, give requirements names and use ``select`` to extract one:
+
+.. code-block:: python
+
+   def compare(data):
+       baseline = eval_live.select(data, "baseline")
+       candidate = eval_live.select(data, "candidate")
+       return [{"baseline_samples": len(baseline["measurements"]),
+                "candidate_samples": len(candidate["measurements"])}]
+
+   reg.table("Comparison", compare, requires={"baseline": old, "candidate": new})
+
+Each name can refer to one request or a sweep over several configurations and
+commits. A callback's ordinary tables contain their union. ``select`` returns
+copies restricted to the named requirement:
 
 .. doctest::
 
-   >>> snapshot = {"measurements": [{"run_id": "sample-a", "seconds": 0.2}]}
-   >>> view = eval_live.ArtifactView(snapshot, {"candidate": ["sample-a"]})
-   >>> view.data["measurements"][0]["seconds"]
+   >>> snapshot = {"measurements": [{"run_id": "sample-a", "seconds": 0.2}],
+   ...             "eval_selections": [{"requirement": "candidate", "run_id": "sample-a"}]}
+   >>> candidate_data = eval_live.select(snapshot, "candidate")
+   >>> candidate_data["measurements"][0]["seconds"]
    0.2
-   >>> view.data["measurements"].clear()
+   >>> candidate_data["measurements"].clear()
    >>> len(snapshot["measurements"])
    1
 
-A ``Figure`` callback returns a matplotlib Figure. A ``Table`` callback returns
-row dictionaries; styled presentation cells from the Registry API still work.
-A ``Macros`` callback returns a mapping from LaTeX macro names (letters only)
-to scalar values. Values are escaped; duplicate macro names across selected
-artifacts are errors. Output filenames use the artifact ID, which must be
-unique and contain only letters, digits, underscores, or hyphens.
+Import matplotlib inside graph callbacks so table-only imports remain
+lightweight. Handle empty data after browser filtering. Rendering callbacks
+must not collect measurements or require files from the benchmark checkout.
 
-For comparisons, declare separate names such as ``baseline`` and ``candidate``
-and use ``view["baseline"]`` and ``view["candidate"]``. Each may refer to a
-different configuration or commit. Import matplotlib inside graph callbacks
-so table-only imports remain lightweight. Handle empty data after browser
-filtering. Rendering callbacks must not collect measurements or require files
-from the benchmark checkout.
+Registrations without ``requires`` still work with ``run_tables(data)``,
+``run_graphs(data)``, and the terminal/directory renderers: these methods use
+the data supplied by the caller and never collect. During ``reg.run``, an
+output without requirements receives no observations, which is useful for
+static output. The file renderer is shared by both paths; ``reg.run`` keeps
+all stored data in one JSON file, while ``render_to_dir`` preserves its table
+JSON sidecars for existing scripts.
 
 Here is the demo's actual catalog and entry point:
 
@@ -147,7 +175,7 @@ CLI and cache behavior
 
 ``add_arguments(parser)`` adds standard options. The script owns ordinary
 ``argparse`` parsing and uses ``args.samples`` and ``args.commit`` in requests.
-``Evaluation.run(args=args, argv=tokens)`` stores every resolved option,
+``reg.run(args=args, argv=tokens)`` stores every resolved option,
 including defaults, and the exact original argument token sequence.
 
 All script-specific options affect cache identity by default. Declare
@@ -181,7 +209,7 @@ completed observations survive restarts.
 Timeouts and retries
 --------------------
 
-Set a benchmark's per-command deadline with ``Benchmark(timeout=60)``. The
+Set a per-command deadline with ``reg.benchmark(..., timeout=60)``. The
 shared ``--timeout`` option overrides it for all selected benchmarks, including
 build commands. Timeouts kill the command's process group on POSIX and record
 the attempt as ``timed-out`` with its stdout/stderr. Arbitrary Python callbacks
@@ -239,15 +267,18 @@ The library embeds the same artifact callbacks and data in HTML. By default,
 callbacks must be named top-level functions from one source file. Set
 ``browser_source=Path(__file__)`` explicitly, or provide a Python source string
 with those functions. The source is imported as a module: a normal
-``if __name__ == '__main__'`` guard keeps collection local. Put imports of
-execution-only APIs inside the entry point; the browser facade exposes
-``Registry``, ``RunRequest``, ``ArtifactView``, ``Figure``, ``Table``, and
-``Macros``. Refer to the demo's ``import eval_live`` pattern.
+``if __name__ == '__main__'`` guard keeps collection local. Put execution-only
+imports inside benchmark callbacks or the entry point.
+Registration itself is safe in the browser: ``Registry``, ``RunRequest``, and
+``select`` work without importing collection code. Refer to the demo's
+``import eval_live`` pattern.
 
-A table's optional ``filter_source(rows, view)`` returns the run IDs matching
-its visible computed rows. Only IDs in its declared requirements may be
-returned. The viewer uses those IDs to narrow user tables, other computed
-outputs, and graphs. Metadata remains available for reconstructing views.
+A table's optional ``filter_source(rows, data)`` keeps the original Registry
+contract: return a data dictionary with raw tables narrowed to the visible
+computed rows. Its input is scoped to that table's selected observations.
+Filters are chained in registration order, and the viewer recomputes tables
+and graphs using the narrowed data. Preserve metadata with ``{**data, ...}``
+when replacing measurement tables, as in the demo:
 
 .. literalinclude:: ../demo/eval.py
    :language: python

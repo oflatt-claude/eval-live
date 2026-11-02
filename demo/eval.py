@@ -6,7 +6,7 @@ from statistics import median
 import eval_live
 
 
-def summary_rows(data):
+def summary(data):
     """Compute medians from flat observations, including empty filtered data."""
     groups = defaultdict(list)
     for row in data["measurements"]:
@@ -18,20 +18,16 @@ def summary_rows(data):
     ]
 
 
-def summary(view):
-    return summary_rows(view.data)
-
-
-def narrow_summary(rows, view):
+def narrow_summary(rows, data):
     keys = {(row["algorithm"], row["size"]) for row in rows}
-    return [row["run_id"] for row in view.data["measurements"]
-            if (row["algorithm"], row["size"]) in keys]
+    return {**data, "measurements": [row for row in data["measurements"]
+            if (row["algorithm"], row["size"]) in keys]}
 
 
-def runtime(view):
+def runtime(data):
     import matplotlib.pyplot as plt
 
-    rows = summary(view)
+    rows = summary(data)
     fig, ax = plt.subplots(figsize=(6, 3.5))
     for algorithm in sorted({row["algorithm"] for row in rows}):
         selected = [row for row in rows if row["algorithm"] == algorithm]
@@ -47,14 +43,15 @@ def runtime(view):
     return fig
 
 
-def history(view):
+def history(data):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(6, 3.5))
     for name in ("baseline", "candidate"):
-        rows = summary_rows(view[name])
+        selected = eval_live.select(data, name)
+        rows = summary(selected)
         if rows:
-            commit = view[name]["eval_runs"][0]["commit"][:8]
+            commit = selected["eval_runs"][0]["commit"][:8]
             ax.plot([r["size"] for r in rows], [r["median_ms"] for r in rows],
                     marker="o", label=f"{name} ({commit})")
     if ax.lines:
@@ -67,9 +64,9 @@ def history(view):
     return fig
 
 
-def numbers(view):
-    rows = summary(view)
-    return {"EvalSamples": len(view.data["measurements"]),
+def numbers(data):
+    rows = summary(data)
+    return {"EvalSamples": len(data["measurements"]),
             "EvalInputSizes": len({row["size"] for row in rows}),
             "EvalBestMedianMs": min((row["median_ms"] for row in rows), default=0)}
 
@@ -154,24 +151,19 @@ def main(argv=None):
                                     samples=args.samples)
 
     current = [request(size, algorithm, args.commit) for size in args.sizes for algorithm in ("list", "set")]
-    artifacts = [
-        eval_live.Figure("runtime", requires={"current": current}, render=runtime, title="Runtime"),
-        eval_live.Table("summary", requires={"current": current}, render=summary,
-                        title="Summary", filter_source=narrow_summary,
-                        caption="Median time for 200 lookups; lower is better."),
-        eval_live.Figure("history", requires={
-            "baseline": [request(size, "set", args.baseline) for size in args.sizes],
-            "candidate": [request(size, "set", args.commit) for size in args.sizes],
-        }, render=history, title="Commit comparison"),
-        eval_live.Macros("macros", requires={"current": current}, render=numbers, title="Paper numbers"),
-    ]
-    evaluation = eval_live.Evaluation(
-        benchmarks=[eval_live.Benchmark("membership", membership, version="1", inputs=["membership.py"])],
-        artifacts=artifacts, selection_arguments=["sizes", "repository"],
-        browser_source=Path(__file__), title="Membership paper evaluation",
-    )
+    reg = eval_live.Registry(selection_arguments=["sizes", "repository"],
+                             browser_source=Path(__file__), title="Membership paper evaluation")
+    reg.benchmark("membership", membership, version="1", inputs=["membership.py"])
+    reg.graph("Runtime", runtime, requires={"current": current})
+    reg.table("Summary", summary, requires={"current": current}, filter_source=narrow_summary,
+              caption="Median time for 200 lookups; lower is better.")
+    reg.graph("Commit comparison", history, id="history", requires={
+        "baseline": [request(size, "set", args.baseline) for size in args.sizes],
+        "candidate": [request(size, "set", args.commit) for size in args.sizes],
+    })
+    reg.macros("Paper numbers", numbers, requires={"current": current}, id="macros")
     try:
-        result = evaluation.run(args=args, argv=tokens)
+        result = reg.run(args=args, argv=tokens)
     except (ValueError, RuntimeError) as error:
         print(error, file=sys.stderr)
         return 1

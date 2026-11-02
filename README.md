@@ -18,10 +18,22 @@ reuses cached results identified by commit and command-line configuration,
 collects missing data, and generates the paper artifacts and an interactive
 webpage from the same definitions.
 
-`Evaluation`, `Benchmark`, and `RunRequest` provide collection, exact caching,
-and dependency planning. `Figure`, `Table`, and `Macros` declare paper outputs.
-The existing `Registry` API remains available for rendering already-collected
-data. See the [Python guide](docs/python-guide.rst),
+Use one `Registry` for benchmarks and paper outputs. The original
+`reg.graph(name, fn)` and `reg.table(name, fn)` API now accepts `requires=`;
+callbacks still receive ordinary data dictionaries. Register benchmark
+callbacks and call `reg.run()` to collect, cache, and render:
+
+```python
+reg = eval_live.Registry()
+reg.benchmark("worker", collect, version="1", inputs=["worker.py"])
+runs = eval_live.RunRequest("worker", samples=3)
+reg.graph("Runtime", runtime, requires=runs)
+reg.table("Summary", summary, requires=runs)
+reg.macros("Paper numbers", numbers, requires=runs)
+reg.run(args=args, argv=tokens)
+```
+
+Existing methods for rendering supplied data still work. See the [Python guide](docs/python-guide.rst),
 [data format](docs/data-format.rst), and [original design plan](docs/refactor-plan.rst).
 
 ## Demo and Python documentation

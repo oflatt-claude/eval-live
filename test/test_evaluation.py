@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import ModuleType
 import unittest
 from unittest.mock import patch
 
@@ -61,25 +62,30 @@ def mutate_input(context):
     return {"measurements": [{"value": 99}]}
 
 
-def table(view):
+def table(data):
+    assert type(data) is dict
     return [{"value": row["value"], "sample": row.get("sample", 0)}
-            for row in view.data["measurements"]]
+            for row in data["measurements"]]
 
 
-def comparison(view):
-    return [{"baseline": view["baseline"]["measurements"][0]["value"],
-             "candidate": view["candidate"]["measurements"][0]["value"]}]
+def comparison(data):
+    return [{"baseline": eval_live.select(data, "baseline")["measurements"][0]["value"],
+             "candidate": eval_live.select(data, "candidate")["measurements"][0]["value"]}]
 
 
-def macros(view):
-    return {"PaperCount": len(view.data["measurements"]), "PaperLabel": "x_y & z"}
+def macros(data):
+    return {"PaperCount": len(data["measurements"]), "PaperLabel": "x_y & z"}
 
 
-def figure(view):
+def figure(data):
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots()
-    ax.plot([row["value"] for row in view.data["measurements"]])
+    ax.plot([row["value"] for row in data["measurements"]])
     return fig
+
+
+def constant_table(data):
+    return [{"message": "No benchmark required"}]
 
 
 class EvaluationTests(unittest.TestCase):
@@ -110,10 +116,14 @@ class EvaluationTests(unittest.TestCase):
     def request(self, *, samples=1, commit="HEAD", **config):
         return eval_live.RunRequest("read", repository=str(self.repo), commit=commit, config=config, samples=samples)
 
-    def evaluation(self, request=None, artifacts=None, benchmark=None, **kwargs):
-        return eval_live.Evaluation(
-            benchmarks=[benchmark or eval_live.Benchmark("read", collect, "1", inputs=["value.txt"])],
-            artifacts=artifacts or [eval_live.Table("values", {"data": request or self.request()}, table)], **kwargs)
+    def evaluation(self, request=None, registry=None, benchmark=None, **kwargs):
+        if registry is None:
+            registry = eval_live.Registry(**kwargs)
+            registry.table("values", table, requires=request or self.request())
+        options = vars(benchmark or eval_live.Benchmark("read", collect, "1", inputs=["value.txt"])).copy()
+        options["fn"] = options.pop("run")
+        registry.benchmark(**options)
+        return registry
 
     def run_eval(self, evaluation=None, *, render=False, **options):
         args = dict(output=self.output, data=self.data, **options)
@@ -138,9 +148,10 @@ class EvaluationTests(unittest.TestCase):
 
     def test_increased_samples_and_shared_requirements(self):
         request = self.request(samples=2)
-        artifacts = [eval_live.Table("first", {"data": request}, table),
-                     eval_live.Table("second", {"data": [request, self.request(samples=3)]}, table)]
-        result = self.run_eval(self.evaluation(artifacts=artifacts))
+        reg = eval_live.Registry()
+        reg.table("first", table, requires=request)
+        reg.table("second", table, requires=[request, self.request(samples=3)])
+        result = self.run_eval(self.evaluation(registry=reg))
         self.assertEqual(result.collected, 3)
         selected = self.stored()["eval_selections"]
         self.assertEqual(sum(row["artifact_id"] == "first" for row in selected), 2)
@@ -149,9 +160,10 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual((result.collected, result.reused), (2, 3))
 
     def test_selection_before_collection_and_invalid_subsets(self):
-        artifacts = [eval_live.Table("first", {"data": self.request(factor=1)}, table),
-                     eval_live.Table("second", {"data": self.request(factor=2)}, table)]
-        self.run_eval(self.evaluation(artifacts=artifacts), only=["second"])
+        reg = eval_live.Registry()
+        reg.table("first", table, requires=self.request(factor=1))
+        reg.table("second", table, requires=self.request(factor=2))
+        self.run_eval(self.evaluation(registry=reg), only=["second"])
         self.assertEqual([call[1] for call in CALLS], [{"factor": 2}])
         with self.assertRaisesRegex(ValueError, "subset excludes"):
             self.run_eval(benchmarks=[])
@@ -176,17 +188,23 @@ class EvaluationTests(unittest.TestCase):
 
     def test_plot_changes_and_output_path_do_not_invalidate(self):
         self.run_eval()
-        other = eval_live.Table("renamed", {"data": self.request()}, table, title="New label")
+        reg = eval_live.Registry()
+        reg.table("New label", table, requires=self.request(), id="renamed")
         with patch("eval_live.planning.render_artifacts", return_value=[]):
-            result = self.evaluation(artifacts=[other]).run(args={"output": self.root / "elsewhere", "data": self.data}, argv=[])
+            result = self.evaluation(registry=reg).run(args={"output": self.root / "elsewhere", "data": self.data}, argv=[])
         self.assertEqual(result.collected, 0)
 
     def test_commit_comparison_isolated_from_dirty_checkout(self):
         (self.repo / "value.txt").write_text("999")
-        artifact = eval_live.Table("comparison", {"baseline": self.request(commit=self.old),
-                                                  "candidate": self.request(commit=self.head)}, comparison)
+        reg = eval_live.Registry()
+        reg.table("comparison", comparison, requires={"baseline": self.request(commit=self.old),
+                                                       "candidate": self.request(commit=self.head)})
+        reg.table("reverse", comparison, requires={"baseline": self.request(commit=self.head),
+                                                    "candidate": self.request(commit=self.old)})
         before = self.git("worktree", "list", "--porcelain")
-        self.run_eval(self.evaluation(artifacts=[artifact]))
+        self.run_eval(self.evaluation(registry=reg), render=True)
+        self.assertIn("10 & 20", (self.output / "comparison.tex").read_text())
+        self.assertIn("20 & 10", (self.output / "reverse.tex").read_text())
         self.assertEqual([row["value"] for row in self.stored()["measurements"]], [10, 20])
         self.assertEqual((self.repo / "value.txt").read_text(), "999")
         self.assertEqual(before, self.git("worktree", "list", "--porcelain"))
@@ -208,10 +226,11 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(CALLS, [])
 
     def test_failures_checkpoint_and_independent_requests_continue(self):
-        artifacts = [eval_live.Table("broken", {"data": self.request(fail=True, samples=3)}, table),
-                     eval_live.Table("working", {"data": self.request()}, table)]
+        reg = eval_live.Registry()
+        reg.table("broken", table, requires=self.request(fail=True, samples=3))
+        reg.table("working", table, requires=self.request())
         with self.assertRaises(eval_live.CollectionError) as caught:
-            self.run_eval(self.evaluation(artifacts=artifacts))
+            self.run_eval(self.evaluation(registry=reg))
         self.assertEqual(caught.exception.result.collected, 1)
         data = self.stored()
         self.assertEqual([row["status"] for row in data["eval_runs"]], ["failure", "success"])
@@ -231,9 +250,10 @@ class EvaluationTests(unittest.TestCase):
 
     def test_increasing_timeout_reuses_successes_and_retries_only_timeouts(self):
         benchmark = eval_live.Benchmark("read", timed_collect, "1")
-        artifacts = [eval_live.Table("fast", {"data": self.request()}, table),
-                     eval_live.Table("slow", {"data": self.request(delayed=True)}, table)]
-        evaluation = self.evaluation(artifacts=artifacts, benchmark=benchmark)
+        reg = eval_live.Registry()
+        reg.table("fast", table, requires=self.request())
+        reg.table("slow", table, requires=self.request(delayed=True))
+        evaluation = self.evaluation(registry=reg, benchmark=benchmark)
         with self.assertRaises(eval_live.CollectionError):
             self.run_eval(evaluation, timeout=0.01)
         original = self.stored()["eval_runs"]
@@ -247,7 +267,10 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(data["eval_runs"][1]["cache_key"], data["eval_runs"][2]["cache_key"])
         arguments = read_parameters([row for row in data["eval_arguments"] if row["invocation_id"] == result.invocation_id])
         self.assertEqual(arguments["timeout"], 5)
-        evaluation = self.evaluation(artifacts=artifacts,
+        reg = eval_live.Registry()
+        reg.table("fast", table, requires=self.request())
+        reg.table("slow", table, requires=self.request(delayed=True))
+        evaluation = self.evaluation(registry=reg,
                                      benchmark=eval_live.Benchmark("read", timed_collect, "1", timeout=10))
         result = self.run_eval(evaluation)
         self.assertEqual((result.reused, result.collected), (2, 0))
@@ -344,7 +367,9 @@ class EvaluationTests(unittest.TestCase):
     def test_build_shared_across_configs_and_skipped_for_cache_hits(self):
         benchmark = eval_live.Benchmark("read", use_binary, "1", build=build, inputs=["value.txt"])
         requests = [self.request(value=1, samples=2), self.request(value=2)]
-        evaluation = self.evaluation(artifacts=[eval_live.Table("values", {"data": requests}, table)], benchmark=benchmark)
+        reg = eval_live.Registry()
+        reg.table("values", table, requires=requests)
+        evaluation = self.evaluation(registry=reg, benchmark=benchmark)
         result = self.run_eval(evaluation)
         self.assertEqual(result.collected, 3)
         self.assertEqual(len(BUILDS), 1)
@@ -405,19 +430,105 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result.collected, 1)
 
     def test_exports_share_samples_and_write_only_one_json_data_file(self):
+        self.run_eval(self.evaluation(self.request(samples=3)))
         request = self.request(samples=2)
-        artifacts = [eval_live.Table("values", {"data": request}, table),
-                     eval_live.Figure("figure", {"data": request}, figure),
-                     eval_live.Macros("macros", {"data": request}, macros)]
-        result = self.run_eval(self.evaluation(artifacts=artifacts), render=True)
-        self.assertEqual(result.collected, 2)
+        reg = eval_live.Registry()
+        reg.table("values", table, requires=request)
+        reg.graph("figure", figure, requires=request)
+        reg.macros("macros", macros, requires=request)
+        result = self.run_eval(self.evaluation(registry=reg), render=True)
+        self.assertEqual((result.collected, result.reused), (0, 2))
+        self.assertEqual(len(reg.run_tables(self.stored())[0]["rows"]), 3)
         self.assertEqual({p.name for p in self.output.glob("*.json")}, {"results.json"})
         self.assertIn(r"\newcommand{\PaperCount}{2}", (self.output / "macros.tex").read_text())
         self.assertIn(r"x\_y \& z", (self.output / "macros.tex").read_text())
         self.assertTrue((self.output / "figure.pdf").read_bytes().startswith(b"%PDF"))
         page = (self.output / "index.html").read_text()
-        self.assertIn("_eval_live_artifacts.py", page)
+        self.assertIn("_eval_live_report.py", page)
         self.assertIn("initEvalLive", page)
+
+    def test_registry_plan_and_invalid_registration_fail_before_collection(self):
+        reg = self.evaluation()
+        plan = reg.plan(args={"output": self.output})
+        self.assertEqual(plan.missing, 1)
+        self.assertFalse(self.output.exists())
+        with self.assertRaisesRegex(ValueError, "duplicate benchmark"):
+            reg.benchmark("read", collect, version="1")
+        with self.assertRaisesRegex(ValueError, "filename-safe"):
+            reg.table("invalid", table, id="../escape")
+        with self.assertRaisesRegex(ValueError, "RunRequest"):
+            reg.table("invalid", table, requires={"empty": []})
+        reg.table("Values!", table, requires=self.request())
+        with self.assertRaisesRegex(ValueError, "IDs.*unique"):
+            self.run_eval(reg)
+        self.assertEqual(CALLS, [])
+
+    def test_registry_can_render_static_outputs_without_benchmarks(self):
+        reg = eval_live.Registry()
+        reg.table("Static text", constant_table)
+        result = self.run_eval(reg, render=True)
+        self.assertEqual(result.collected, 0)
+        self.assertIn("No benchmark required", (self.output / "static-text.tex").read_text())
+        self.assertEqual(self.stored()["eval_runs"], [])
+        self.run_eval(reg, render=True, render_only=True)
+
+
+class RegistryTests(unittest.TestCase):
+    def test_browser_module_supports_registration_without_collection_imports(self):
+        module = ModuleType("standalone_eval_live")
+        with patch.dict(sys.modules, {module.__name__: module}):
+            exec(eval_live.pyodide_lib(), module.__dict__)
+            reg = module.Registry()
+            reg.benchmark("worker", collect, version="1")
+            reg.table("Values", table, requires=module.RunRequest("worker"))
+            self.assertEqual(reg.run_tables({"measurements": [{"value": 7}]})[0]["rows"],
+                             [{"value": 7, "sample": 0}])
+
+    def test_original_callbacks_and_filters_work_with_requirements_registered(self):
+        reg = eval_live.Registry()
+        request = eval_live.RunRequest("never-collected")
+        data = {"measurements": [{"value": 1}, {"value": 2}, {"value": 3}]}
+
+        def keep(rows, data):
+            values = {row["value"] for row in rows}
+            return {**data, "measurements": [row for row in data["measurements"] if row["value"] in values]}
+
+        reg.table("First table", table, keep, requires=request, caption="Original signature")
+        reg.table("Second table", table, keep)
+        reg.macros("Paper numbers", macros)
+        reg.graph("First table", figure)  # Existing renderers allow graph/table titles to match.
+        filtered = reg.apply_table_filters([
+            {"name": "First table", "filtered_rows": [{"value": 1}, {"value": 2}]},
+            {"name": "Second table", "filtered_rows": [{"value": 2}, {"value": 3}]},
+        ], data)
+        self.assertEqual(filtered["measurements"], [{"value": 2}])
+        self.assertEqual(len(data["measurements"]), 3)
+        rendered = reg.run_tables(filtered)
+        self.assertEqual(rendered[0]["rows"], [{"value": 2, "sample": 0}])
+        self.assertEqual(rendered[0]["caption"], "Original signature")
+        self.assertTrue(rendered[0]["has_filter_source"])
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = reg.render_to_dir(filtered, temporary, fmt="svg", dpi=72)
+            self.assertTrue(all(isinstance(path, str) for path in paths))
+            self.assertEqual({Path(path).name for path in paths},
+                             {"first-table.json", "first-table.tex", "second-table.json",
+                              "second-table.tex", "paper-numbers.tex", "first-table.svg"})
+            self.assertIn(r"\newcommand{\PaperCount}{1}", Path(temporary, "paper-numbers.tex").read_text())
+
+    def test_select_preserves_snapshot_and_handles_empty_filtered_data(self):
+        data = {"measurements": [{"run_id": "a", "value": 1}, {"run_id": "b", "value": 2}],
+                "eval_runs": [{"run_id": "a", "config_id": "x"}, {"run_id": "b", "config_id": "y"}],
+                "eval_configs": [{"config_id": "x", "value": 1}, {"config_id": "y", "value": 2}],
+                "eval_selections": [{"requirement": "baseline", "run_id": "a"},
+                                    {"requirement": "candidate", "run_id": "b"}]}
+        selected = eval_live.select(data, "baseline")
+        self.assertEqual(selected["measurements"], [{"run_id": "a", "value": 1}])
+        self.assertEqual(selected["eval_configs"], [{"config_id": "x", "value": 1}])
+        selected["measurements"][0]["value"] = 99
+        self.assertEqual(data["measurements"][0]["value"], 1)
+        self.assertEqual(eval_live.select({**data, "measurements": []}, "baseline")["measurements"], [])
+        with self.assertRaisesRegex(ValueError, "unknown requirement"):
+            eval_live.select(data, "missing")
 
 
 class StoreTests(unittest.TestCase):

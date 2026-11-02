@@ -32,7 +32,7 @@ def add_arguments(parser: ArgumentParser, *, output: str | Path = "out") -> Argu
 
     Scripts use ``args.commit`` and ``args.samples`` when declaring requests.
     Unknown script arguments affect cache identity unless explicitly excluded
-    with ``Evaluation(selection_arguments=...)``. Every argument is saved.
+    with ``Registry(selection_arguments=...)``. Every argument is saved.
     """
     parser.add_argument("--output", type=Path, default=Path(output), help="artifact directory")
     parser.add_argument("--data", type=Path, default=None, help="JSON data/cache file (default: OUTPUT/results.json)")

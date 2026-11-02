@@ -69,59 +69,245 @@ If multiple computed tables each have a filter_source, they are chained:
 each one narrows the data further.  A table without filter_source has no
 effect on the raw tables when filtered.
 """
+from __future__ import annotations
+
 import io
 import base64
+from dataclasses import dataclass, field
+import math
+import re
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 
 # The user script sets this module-level variable.
 registry = None
 
 
-class Registry:
-    """Central object that holds all graph, table, and filter registrations.
+@dataclass(frozen=True)
+class RunRequest:
+    """Data required from one benchmark, commit, and configuration.
 
-    Create one in your script, register everything, then assign it to
-    ``eval_live.registry`` so the JS engine can find it.
+    ``repository`` is a local Git repository; ``commit`` is a ref or full SHA.
+    Use ``WORKTREE`` explicitly to execute current working files. Dirty
+    worktrees require ``--allow-dirty`` and never reuse persisted observations.
+    ``config`` contains scalar or scalar-list parameters. ``samples`` is the
+    minimum observation count and does not affect an observation's cache key.
     """
 
-    def __init__(self):
-        self._graphs = []   # list of (name, fn)
-        self._tables = []   # list of (name, fn, filter_source_fn | None, caption | None)
+    benchmark: str
+    config: Mapping[str, Any] = field(default_factory=dict)
+    repository: str = "."
+    commit: str = "HEAD"
+    samples: int = 1
 
-    def graph(self, name, fn):
-        """Register a graph function.
+    def __post_init__(self):
+        if type(self.samples) is not int or self.samples < 1:
+            raise ValueError("samples must be a positive integer")
+        if not self.benchmark or not self.commit:
+            raise ValueError("benchmark and commit must be nonempty")
+        frozen = {}
+        for name, value in self.config.items():
+            if not isinstance(name, str):
+                raise ValueError("configuration names must be strings")
+            values = value if isinstance(value, (list, tuple)) else [value]
+            for item in values:
+                if item is not None and type(item) not in (str, int, bool, float):
+                    raise ValueError("configurations contain only scalars and scalar lists")
+                if type(item) is float and not math.isfinite(item):
+                    raise ValueError("configuration numbers must be finite")
+            frozen[name] = tuple(values) if isinstance(value, (list, tuple)) else value
+        object.__setattr__(self, "config", MappingProxyType(frozen))
 
-        Parameters
-        ----------
-        name : str
-            Display name shown in the graph button bar.
-        fn : callable
-            ``fn(data) -> matplotlib.figure.Figure``
+
+@dataclass(frozen=True)
+class _Output:
+    """One registry entry; shared by planning, local export, and the browser."""
+
+    kind: str
+    id: str
+    title: str
+    render: Callable
+    requires: Mapping
+    caption: str | None = None
+    filter_source: Callable | None = None
+
+
+def _requirements(requires):
+    if requires is None:
+        return {}
+    if not isinstance(requires, Mapping):
+        requires = {"data": requires}
+    result = {}
+    for name, requests in requires.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("requirement names must be nonempty strings")
+        requests = (requests,) if isinstance(requests, RunRequest) else tuple(requests)
+        if not requests or any(not isinstance(request, RunRequest) for request in requests):
+            raise ValueError("each requirement must contain at least one RunRequest")
+        result[name] = requests
+    return MappingProxyType(result)
+
+
+def _select_rows(data, ids):
+    result = {
+        table: [dict(row) for row in rows if row.get("run_id") in ids]
+        for table, rows in data.items()
+        if not table.startswith("eval_") or table in ("eval_runs", "eval_selections")
+    }
+    configs = {row["config_id"] for row in result.get("eval_runs", [])}
+    result["eval_configs"] = [dict(row) for row in data.get("eval_configs", [])
+                              if row["config_id"] in configs]
+    return result
+
+
+def _scoped_data(data, selections):
+    result = _select_rows(data, {run_id for ids in selections.values() for run_id in ids})
+    # A callback sees only this output's named selections, even when the same
+    # observation has different roles in other outputs or earlier invocations.
+    result["eval_selections"] = [{"requirement": name, "run_id": run_id}
+                                for name, ids in selections.items() for run_id in ids]
+    return result
+
+
+def select(data: dict, requirement: str) -> dict:
+    """Select one named requirement from a registry callback's data dictionary.
+
+    For ``requires={"baseline": old, "candidate": new}``, use
+    ``select(data, "baseline")["measurements"]``. The callback's ordinary data
+    tables contain the union of its requirements. Returned rows are copied,
+    and selection still works after interactive filters remove all measurements.
+    """
+    rows = data.get("eval_selections", [])
+    if requirement not in {row["requirement"] for row in rows}:
+        raise ValueError(f"unknown requirement: {requirement!r}")
+    return _select_rows(data, {row["run_id"] for row in rows if row["requirement"] == requirement})
+
+
+class Registry:
+    """Register a paper's benchmarks, graphs, tables, and LaTeX macros.
+
+    Existing ``graph(name, fn)`` and ``table(name, fn, filter_source=...)``
+    callbacks keep receiving ordinary data dictionaries. Add ``requires=``
+    to declare benchmark inputs, then call ``run(args=..., argv=...)`` to
+    collect, cache, and generate paper outputs plus HTML.
+
+    ``selection_arguments`` names paper-specific options that select work
+    without changing measurements. ``browser_source`` is a Path or source
+    string containing top-level rendering callbacks; their common source file
+    is used by default. Guard local execution with ``if __name__ == '__main__'``.
+    """
+
+    def __init__(self, *, selection_arguments=(), browser_source=None, title="Paper evaluation"):
+        self._outputs = []
+        self._benchmarks = {}
+        self.selection_arguments = set(selection_arguments)
+        self.browser_source = browser_source
+        self.title = title
+
+    def benchmark(self, name, fn, *, version, **options):
+        """Register ``fn(context) -> named flat tables`` for one observation.
+
+        ``version`` identifies the measurement protocol. Options are the
+        fields of :class:`Benchmark`: ``inputs``, ``dependencies``, ``build``,
+        ``build_config``, ``environment``, ``tools``, and ``timeout`` (seconds
+        per command, default 300). Registration only records the callback;
+        collection code is imported when planning or running locally.
         """
-        self._graphs.append((name, fn))
+        if name in self._benchmarks:
+            raise ValueError(f"duplicate benchmark: {name!r}")
+        self._benchmarks[name] = dict(name=name, run=fn, version=version, **options)
 
-    def table(self, name, fn, filter_source=None, *, caption=None):
-        """Register a computed table function.
+    def _add(self, kind, name, fn, requires, id, caption=None, filter_source=None):
+        if not callable(fn):
+            raise ValueError("output callback must be callable")
+        output_id = id if id is not None else re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "graph"
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", output_id):
+            raise ValueError("output IDs must be filename-safe letters, digits, underscores, or hyphens")
+        self._outputs.append(_Output(kind, output_id, name, fn, _requirements(requires), caption, filter_source))
 
-        Parameters
-        ----------
-        name : str
-            Display name shown as the table heading.
-        fn : callable
-            ``fn(data) -> list[dict]``  — each dict is one row.  Columns and
-            headers are the row keys, in first-seen order.  A cell value may be a
-            scalar or a styled cell ``{"text": ..., "style": ...}`` (see
-            ``console._cell_parts``).
-        filter_source : callable or None
-            Optional.  ``filter_source(filtered_rows, data) -> data``
-            Called when the user filters this computed table.  Receives
-            the visible computed rows and the current data dict (which
-            may already be narrowed by a previous table's filter_source);
-            returns a new data dict with raw rows narrowed accordingly.
-            See the module docstring for a full example.
-        caption : str or None
-            Optional caption shown under the table in the terminal and web view.
+    def graph(self, name, fn, *, requires=None, id=None):
+        """Register ``fn(data) -> matplotlib.figure.Figure``.
+
+        ``name`` is the display title. ``requires`` may be one ``RunRequest``,
+        a list of requests, or a mapping of named requirements for comparisons.
+        ``run`` passes only this output's selected observations to the callback.
+        ``id`` defaults to a slug of the name and controls filenames and
+        ``--only`` selection. Direct ``run_graphs(data)`` uses the supplied data.
         """
-        self._tables.append((name, fn, filter_source, caption))
+        self._add("graph", name, fn, requires, id)
+
+    def table(self, name, fn, filter_source=None, *, caption=None, requires=None, id=None):
+        """Register ``fn(data) -> list[dict]``; row keys are column headings.
+
+        Cells can be scalars or styled ``{"text": ..., "style": ...}`` values.
+        ``filter_source(filtered_rows, data) -> data`` keeps the original
+        contract: return a dictionary with raw tables narrowed to matching rows.
+        Filters are chained in registration order. ``caption`` is shown below
+        the table in the terminal and browser. ``requires`` and ``id`` work as
+        in :meth:`graph`; existing registrations need no changes.
+        """
+        self._add("table", name, fn, requires, id, caption, filter_source)
+
+    def macros(self, name, fn, *, requires=None, id=None):
+        """Register ``fn(data) -> {LaTeXMacroName: scalar_value}``.
+
+        Macro names contain letters only; values are LaTeX-escaped. Local
+        export writes a ``.tex`` file, and the browser/terminal shows the names
+        and values as a table. ``requires`` and ``id`` work as in :meth:`graph`.
+        """
+        self._add("macros", name, fn, requires, id)
+
+    def plan(self, *, args=None):
+        """Inspect selected outputs, cached samples, and missing work without writes."""
+        from .planning import _Runner
+        return _Runner(self).plan(args=args)
+
+    def run(self, *, args=None, argv=None):
+        """Collect required observations and write paper outputs plus HTML.
+
+        Save all CLI arguments/defaults and data as flat tables in one JSON
+        file. ``--timeout`` overrides command deadlines; raising it preserves
+        successful samples and retries timed-out work. ``--dry-run`` inspects
+        the plan; ``--render-only`` replays saved selections without benchmarks.
+        Incomplete collection raises ``CollectionError`` after checkpointing
+        failures and rendering independent outputs whose inputs are complete.
+        """
+        from .planning import _Runner
+        return _Runner(self).run(args=args, argv=argv)
+
+    @property
+    def _graphs(self):
+        return [(output.title, output.render) for output in self._outputs if output.kind == "graph"]
+
+    @property
+    def _tables(self):
+        result = []
+        for output in self._outputs:
+            if output.kind == "graph":
+                continue
+            fn = output.render
+            if output.kind == "macros":
+                def fn(data, render=fn):
+                    return [{"macro": name, "value": value} for name, value in render(data).items()]
+            result.append((output.title, fn, output.filter_source, output.caption))
+        return result
+
+    def _bind(self, selections):
+        """Use the same registry callbacks with a saved selection per output."""
+        bound = Registry()
+        for output in self._outputs:
+            scope = selections[output.id]
+
+            def render(data, output=output, scope=scope):
+                return output.render(_scoped_data(data, scope))
+
+            def narrow(rows, data, output=output, scope=scope):
+                narrowed = output.filter_source(rows, _scoped_data(data, scope))
+                return {**data, **narrowed}
+
+            bound._add(output.kind, output.title, render, None, output.id, output.caption,
+                       narrow if output.filter_source else None)
+        return bound
 
     def run_graphs(self, data):
         """Run all registered graph functions and return rendered results.
@@ -145,54 +331,16 @@ class Registry:
         return results
 
     def render_to_dir(self, data, outdir, fmt="pdf", dpi=150):
-        """Render every registered graph and table to files on disk, locally
-        (no browser/Pyodide). Graphs are written as ``<slug>.<fmt>`` (PDF by
-        default); each table is written both as ``<slug>.json`` (the same list
-        of row dicts the live viewer consumes) and as ``<slug>.tex`` (a LaTeX
-        ``tabular``). Returns the list of written paths. This is the on-disk
-        counterpart to ``run_graphs``/``run_tables`` (which return base64/JSON
-        for the live viewer). Requires matplotlib to be installed in the local
-        environment.
+        """Render supplied data to graph, table, and macro files locally.
+
+        Graphs use ``fmt`` (PDF by default); nonempty tables produce both JSON
+        and LaTeX, preserving the original Registry behavior. Macros produce
+        LaTeX. Return the written paths. No benchmarks run: ``requires`` is used
+        by :meth:`run`, which stores data in one JSON file without table sidecars.
         """
-        import os
-        import re
-        import json
-        import matplotlib
-        matplotlib.use("AGG")
-        import matplotlib.pyplot as plt
-
-        from . import latex
-
-        os.makedirs(outdir, exist_ok=True)
-        written = []
-
-        def slug(name):
-            return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "graph"
-
-        for name, fn in self._graphs:
-            fig = fn(data)
-            path = os.path.join(outdir, f"{slug(name)}.{fmt}")
-            fig.savefig(path, format=fmt, dpi=dpi, bbox_inches="tight")
-            plt.close(fig)
-            written.append(path)
-
-        for name, fn, _fs, _caption in self._tables:
-            rows = fn(data)
-            if not rows:
-                continue
-            cols = list(dict.fromkeys(k for r in rows for k in r))
-
-            json_path = os.path.join(outdir, f"{slug(name)}.json")
-            with open(json_path, "w") as f:
-                json.dump(rows, f, indent=2)
-            written.append(json_path)
-
-            tex_path = os.path.join(outdir, f"{slug(name)}.tex")
-            with open(tex_path, "w") as f:
-                f.write(latex.table(rows, cols))
-            written.append(tex_path)
-
-        return written
+        from .render import render_outputs
+        return [str(path) for path in render_outputs(data, self._outputs, outdir,
+                                                    fmt=fmt, dpi=dpi, table_json=True)]
 
     def run_tables(self, data):
         """Run all registered table functions and return their rows.

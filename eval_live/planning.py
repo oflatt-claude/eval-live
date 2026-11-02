@@ -14,7 +14,7 @@ import time
 from typing import Mapping, Sequence
 import uuid
 
-from .artifacts import Artifact, Figure, Macros, Table
+from .eval_live import Registry, _Output
 from .benchmarks import Benchmark, ProcessError, RunContext, callable_identity, file_digest
 from .cli import CONTROL_ARGUMENTS
 from .render import render_artifacts
@@ -55,7 +55,7 @@ class PlannedRun:
 class Plan:
     """Selected artifacts, shared run requests, and their named dependencies."""
 
-    artifacts: list[Artifact]
+    artifacts: list[_Output]
     runs: dict[str, PlannedRun]
     requirements: dict[str, dict[str, list[tuple[str, int]]]]
 
@@ -102,36 +102,21 @@ class CollectionError(RuntimeError):
         super().__init__("evaluation incomplete: " + "; ".join(errors))
 
 
-class Evaluation:
-    """A paper's benchmark definitions and ordered artifact catalog.
+class _Runner:
+    """Local collection engine for a Registry; never imported in the browser."""
 
-    ``run(args=namespace, argv=tokens)`` saves all arguments, plans selected
-    artifacts, reuses exact observations, and writes paper outputs and HTML.
-    Unknown CLI parameters affect measurement identity by default. Explicitly
-    list selection-only parameters in ``selection_arguments``; their resolved
-    values must still be expressed in individual requests where appropriate.
-
-    ``browser_source`` can be a Path or source string containing top-level
-    rendering callbacks. By default their common source file is used. Keep
-    execution in a normal ``__main__`` guard so importing it only defines code.
-    """
-
-    def __init__(self, *, benchmarks: Sequence[Benchmark], artifacts: Sequence[Artifact],
-                 selection_arguments: Sequence[str] = (), browser_source: str | Path | None = None,
-                 title: str = "Paper evaluation"):
-        self.benchmarks = {benchmark.name: benchmark for benchmark in benchmarks}
-        if len(self.benchmarks) != len(benchmarks):
-            raise ValueError("benchmark names must be unique")
-        self.artifacts = list(artifacts)
-        if not self.artifacts or any(type(a) not in (Figure, Table, Macros) for a in self.artifacts):
-            raise ValueError("provide at least one Figure, Table, or Macros artifact")
+    def __init__(self, registry: Registry):
+        self.benchmarks = {name: Benchmark(**options) for name, options in registry._benchmarks.items()}
+        self.artifacts = registry._outputs
+        if not self.artifacts:
+            raise ValueError("register at least one graph, table, or macros output")
         ids = [artifact.id.casefold() for artifact in self.artifacts]
-        titles = [artifact.title or artifact.id for artifact in self.artifacts]
+        titles = [artifact.title for artifact in self.artifacts]
         if len(set(ids)) != len(ids) or len(set(titles)) != len(titles):
-            raise ValueError("artifact IDs and display names must be unique")
-        self.selection_arguments = set(selection_arguments)
-        self.browser_source = browser_source
-        self.title = title
+            raise ValueError("output IDs and display names must be unique")
+        self.selection_arguments = registry.selection_arguments
+        self.browser_source = registry.browser_source
+        self.title = registry.title
 
     @staticmethod
     def _options(args: Namespace | Mapping | None) -> dict:
@@ -148,7 +133,7 @@ class Evaluation:
             raise ValueError("--invocation requires --render-only")
         return options
 
-    def _artifacts(self, options: dict) -> list[Artifact]:
+    def _artifacts(self, options: dict) -> list[_Output]:
         names = options["only"]
         if names is None:
             return self.artifacts
@@ -350,7 +335,7 @@ class Evaluation:
         return collected, errors
 
     @staticmethod
-    def _selections(store: Store, plan: Plan, invocation_id: str) -> tuple[list[Artifact], dict]:
+    def _selections(store: Store, plan: Plan, invocation_id: str) -> tuple[list[_Output], dict]:
         ready = []
         selections = {}
         for artifact in plan.artifacts:

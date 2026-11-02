@@ -7,8 +7,9 @@ pip install -e '.[render]'
 python demo/eval.py
 ```
 
-This single script creates a tiny local Git repository with two commits and
-runs all four paper outputs. It compares list/set membership across input
+This single script uses one `Registry` for its benchmark, graphs, table, and
+macros. It creates a tiny local Git repository with two commits and runs all
+four paper outputs. It compares list/set membership across input
 sizes and compares the same set configuration before and after an optimization.
 No clone or compiler is needed. The full run requires 27 observations, shared
 across the artifact declarations.
@@ -56,7 +57,9 @@ access; interactive Python outputs fetch Pyodide and matplotlib from a CDN.
 The page does not collect measurements.
 
 Read [eval.py](eval.py) from the top: pure rendering callbacks, a benchmark
-callback, fixture setup, and the explicit artifact catalog in `main`. Git
+callback, fixture setup, and the registry declarations in `main`. Callbacks
+receive ordinary data dictionaries; `select(data, name)` picks a named
+requirement for the commit comparison. Git
 worktrees, caching, sample selection, JSON persistence, LaTeX, and HTML assembly
 are handled by eval-live. The fixture is in `demo/out/repository`; `--commit`
 and `--baseline` select its revisions. `WORKTREE` explicitly selects current

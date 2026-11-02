@@ -1,30 +1,31 @@
 Python API reference
 ====================
 
-Evaluation and planning
------------------------
+Registry
+--------
 
-.. autoclass:: eval_live.Evaluation
-   :members:
+One registry holds benchmarks and outputs. Add ``requires=`` to the existing
+``graph`` and ``table`` methods to opt into collection; callbacks continue to
+receive ordinary data dictionaries. ``macros`` adds LaTeX definitions.
 
-.. autoclass:: eval_live.Plan
-   :members:
-
-.. autoclass:: eval_live.EvaluationResult
-   :members:
-
-.. autoclass:: eval_live.CollectionError
-   :members:
-
-.. autofunction:: eval_live.add_arguments
-
-Benchmarks and requirements
----------------------------
-
-.. autoclass:: eval_live.Benchmark
+.. autoclass:: eval_live.Registry
    :members:
 
 .. autoclass:: eval_live.RunRequest
+   :members:
+
+.. autofunction:: eval_live.select
+
+.. autofunction:: eval_live.add_arguments
+
+Benchmark callbacks
+-------------------
+
+``Registry.benchmark(name, fn, version=..., **options)`` accepts the options
+listed on ``Benchmark``. Scripts register directly on their registry; they do
+not need to construct benchmark objects separately.
+
+.. autoclass:: eval_live.Benchmark
    :members:
 
 .. autoclass:: eval_live.RunContext
@@ -38,35 +39,23 @@ Benchmarks and requirements
 .. autoclass:: eval_live.ProcessError
    :members:
 
-Artifacts
----------
+Plans, results, and storage
+---------------------------
 
-.. autoclass:: eval_live.artifacts.Artifact
+.. autoclass:: eval_live.Plan
    :members:
 
-.. autoclass:: eval_live.Figure
+.. autoclass:: eval_live.EvaluationResult
    :members:
 
-.. autoclass:: eval_live.Table
+.. autoclass:: eval_live.CollectionError
    :members:
-
-.. autoclass:: eval_live.Macros
-   :members:
-
-.. autoclass:: eval_live.ArtifactView
-   :members:
-
-Storage
--------
 
 .. autoclass:: eval_live.Store
    :members:
 
-Legacy Registry and browser assets
-----------------------------------
-
-.. autoclass:: eval_live.Registry
-   :members:
+Browser assets
+--------------
 
 .. autofunction:: eval_live.css
 
@@ -74,8 +63,9 @@ Legacy Registry and browser assets
 
 .. autofunction:: eval_live.pyodide_lib
 
-The legacy browser script assigns its registry to ``eval_live.registry``.
-The new HTML exporter builds that registry from artifact definitions.
+A standalone browser script assigns its registry to ``eval_live.registry``.
+``Registry.run`` generates the page and connects the same registered callbacks
+to their saved sample selections automatically.
 
 LaTeX helpers
 -------------
