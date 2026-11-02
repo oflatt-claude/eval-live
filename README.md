@@ -20,8 +20,10 @@ webpage from the same definitions.
 
 Use one `Registry` for benchmarks, figures, tables, and macros. Register
 callbacks directly or with decorators such as `@reg.graph("Runtime")`.
-`requires=` selects treatments for an output; omitting it selects the entire
-catalog. Call `reg.run()` to collect, cache, and render:
+`requires=` selects treatments for an output before collection; omitting it
+selects the entire catalog. `interactive_filter=` propagates browser selections
+through already collected data, including selections based on computed values.
+Call `reg.run()` to collect, cache, and render:
 
 ```python
 def error_rows(treatment, status):
@@ -146,7 +148,7 @@ import eval_live
 
 reg = eval_live.Registry()
 reg.graph("My Graph", my_graph_fn)
-reg.table("Summary", summary_fn, filter_source=summary_filter_fn)
+reg.table("Summary", summary_fn, interactive_filter=summary_filter_fn)
 eval_live.registry = reg
 ```
 

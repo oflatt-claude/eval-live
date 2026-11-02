@@ -24,7 +24,7 @@ def source_for(artifacts: Sequence[_Output], source: str | Path | None) -> str:
     if isinstance(source, str):
         return source
     paths = {inspect.getsourcefile(fn) for artifact in artifacts
-             for fn in (artifact.render, artifact.filter_source) if fn is not None}
+             for fn in (artifact.render, artifact.interactive_filter) if fn is not None}
     if None in paths or len(paths) != 1:
         raise ValueError("HTML callbacks need one source file; supply browser_source explicitly otherwise")
     return Path(paths.pop()).read_text(encoding="utf-8")
@@ -44,13 +44,13 @@ def write_html(path: str | Path, data: dict, artifacts: Sequence[_Output], selec
     script = source_for(artifacts, source)
     descriptors = []
     for artifact in artifacts:
-        for function in (artifact.render, artifact.filter_source):
+        for function in (artifact.render, artifact.interactive_filter):
             if function and (function.__name__ != function.__qualname__ or function.__name__ == "<lambda>"):
                 raise ValueError("HTML callbacks must be named top-level functions")
         descriptors.append({"id": artifact.id, "kind": artifact.kind,
                             "title": artifact.title, "caption": artifact.caption,
                             "render": artifact.render.__name__,
-                            "filter": artifact.filter_source.__name__ if artifact.filter_source else None})
+                            "filter": artifact.interactive_filter.__name__ if artifact.interactive_filter else None})
     bootstrap = f'''import eval_live
 import _eval_live_report as report
 _reg = eval_live.Registry()

@@ -345,10 +345,22 @@ or supply ``browser_source=Path(__file__)`` explicitly. Keep execution under
 callbacks or the entry point. Registration is safe during browser imports.
 Treatment selectors can be lambdas or closures: replay does not execute them.
 
-Use ``filter_source(rows, data)`` to return a data
-dictionary with raw tables narrowed to visible computed rows. Preserve metadata
-with ``{**data, ...}`` when replacing tables. Filters chain in registration order.
-Handle empty filtered data in graph/table callbacks.
+``requires`` selects treatments before collection and limits each rendering
+callback to its selected data. Browser filtering does not change these
+requirements or collect more data.
+
+Register ``@reg.table("Summary", interactive_filter=narrow_summary, ...)`` to
+propagate visible computed rows to other tables and figures. The callback receives
+those rows and the shared dataset across all outputs, after raw-table filters
+and preceding interactive filters. It returns a dictionary with raw tables
+narrowed to matching rows. Preserve other tables and metadata with
+``{**data, ...}``. Filters chain in registration order. Handle empty filtered
+data in graph/table callbacks.
+
+For example, a summary of the current commit can filter measurements by size
+across both baseline and current commits. A comparison figure then receives
+the matching rows within its own requirements. Filters can also use measured
+or computed values, such as a summary's median runtime.
 
 .. literalinclude:: ../demo/eval.py
    :language: python

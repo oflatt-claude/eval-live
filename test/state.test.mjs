@@ -142,19 +142,19 @@ test("effectiveRawData narrows graph data by engine.narrowing", () => {
 test("computedFilterInputs: from UNFILTERED tables, only when filter is active", () => {
   const state = ctx.makeState({ runs: ROWS });
   state.engine.computedUnfiltered = [
-    { name: "summary", hasFilterSource: true, rows: ROWS },
-    { name: "nofs", hasFilterSource: false, rows: ROWS },
+    { name: "summary", hasInteractiveFilter: true, rows: ROWS },
+    { name: "nofs", hasInteractiveFilter: false, rows: ROWS },
   ];
   // no ui / no filter -> nothing to narrow
   eq(ctx.computedFilterInputs(state), []);
-  // a filter on the filter_source table -> its selected rows are emitted
+  // a filter on the interactive_filter table -> its selected rows are emitted
   ctx.ensureTableUi(state, "summary", "computed");
   ctx.setColFilter(state, "summary", "backend", "feldera");
   const cf = ctx.computedFilterInputs(state);
   eq(cf.length, 1);
   eq(cf[0].name, "summary");
   eq(cf[0].filtered_rows.length, 2);
-  // a filter on a table WITHOUT a filter_source is ignored
+  // a filter on a table WITHOUT an interactive_filter is ignored
   ctx.ensureTableUi(state, "nofs", "computed");
   ctx.setColFilter(state, "nofs", "backend", "feldera");
   eq(ctx.computedFilterInputs(state).length, 1);

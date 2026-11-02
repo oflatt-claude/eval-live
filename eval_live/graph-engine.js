@@ -94,7 +94,7 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
     return raw.map((t) => ({
       name: t.get("name"),
       rows: t.get("rows").map(plainValue),
-      hasFilterSource: t.get("has_filter_source"),
+      hasInteractiveFilter: t.get("has_interactive_filter"),
       caption: t.get("caption"),
     }));
   }

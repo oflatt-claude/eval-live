@@ -34,11 +34,15 @@ def main():
             summary.locator(".sql-filter-input").fill("algorithm = 'set' AND size = 500")
             page.wait_for_function("""() => Array.from(document.querySelectorAll('.raw-container .table-section'))
                 .find(el => el.querySelector('.table-title').textContent === 'measurements')
-                .querySelector('.row-count').textContent.includes('3/27')""", timeout=15000)
+                .querySelector('.row-count').textContent.includes('6/27')""", timeout=15000)
             page.wait_for_function("old => document.querySelector('.graph-display img').src !== old",
                                    arg=previous, timeout=15000)
             assert not errors, errors
-            print("Browser: both graphs, summary, and propagated filtering passed.")
+            page.get_by_text("Clear all filters", exact=True).click()
+            page.wait_for_function("""() => Array.from(document.querySelectorAll('.raw-container .table-section'))
+                .find(el => el.querySelector('.table-title').textContent === 'measurements')
+                .querySelectorAll('tbody tr').length === 27""", timeout=15000)
+            print("Browser: both graphs, summary, and filter propagation across commits passed.")
             check_messages(page)
             assert not errors, errors
         finally:

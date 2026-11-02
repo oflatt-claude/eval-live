@@ -9,7 +9,7 @@ Quick start::
 
     reg = eval_live.Registry()
     reg.graph("My Graph", my_graph)
-    reg.table("Mean Timing", mean_timing, filter_source=mean_timing_filter)
+    reg.table("Mean Timing", mean_timing, interactive_filter=mean_timing_filter)
     eval_live.registry = reg
 
 Graphs
@@ -36,23 +36,24 @@ These are rendered as filterable HTML tables below the raw data tables::
             result.append({"file": row["file"], "mean": round(mean, 4), "n": n})
         return result
 
-Filters (filter_source)
------------------------
+Interactive filters
+-------------------
 When the user types in a computed table's filter box, only some computed
-rows remain visible.  A ``filter_source`` function lets you propagate that
+rows remain visible. An ``interactive_filter`` function lets you propagate that
 filter back to the *raw* data tables.
 
 It receives two arguments:
 
 - **filtered_rows**: the list of computed row dicts that are currently
   visible after the user's text filter.
-- **data**: the *original* (unfiltered) data dict.
+- **data**: the shared data dictionary after raw-table filters and any
+  preceding interactive filters, including other outputs' commits and treatments.
 
 It returns a **new data dict** with the appropriate raw rows removed.
 eval-live then hides raw-table rows that aren't in the returned data.
 
 Example: if your computed table has one row per (file, treatment) pair,
-the filter_source narrows raw timings to matching pairs::
+the interactive_filter narrows raw timings to matching pairs::
 
     def mean_timing_filter(filtered_rows, data):
         # Build the set of primary keys the user wants to see
@@ -64,8 +65,8 @@ the filter_source narrows raw timings to matching pairs::
                         if (r["file"], r["treatment"]) in keys],
         }
 
-If multiple computed tables each have a filter_source, they are chained:
-each one narrows the data further.  A table without filter_source has no
+If multiple computed tables each have an interactive_filter, they are chained:
+each one narrows the data further.  A table without interactive_filter has no
 effect on the raw tables when filtered.
 """
 from __future__ import annotations
@@ -118,7 +119,7 @@ class _Output:
     render: Callable
     requires: Mapping
     caption: str | None = None
-    filter_source: Callable | None = None
+    interactive_filter: Callable | None = None
 
 
 def _requirements(requires):
@@ -226,7 +227,7 @@ class Registry:
         """
         messages = dict.fromkeys(item for group in self._messages.values() for item in group)
         return [{"name": name, "rows": [{"message": message} for kind, message in messages if kind == level],
-                 "has_filter_source": False, "caption": None}
+                 "has_interactive_filter": False, "caption": None}
                 for level, name in (("warning", "Warnings"), ("error", "Errors"))]
 
     def benchmark(self, name, fn=None, *, version, error_rows, treatments=None, repository=".", commit=None, **options):
@@ -272,9 +273,9 @@ class Registry:
         }
         return fn
 
-    def _add(self, kind, name, fn, requires, id, caption=None, filter_source=None):
+    def _add(self, kind, name, fn, requires, id, caption=None, interactive_filter=None):
         if fn is None:
-            return lambda callback: self._add(kind, name, callback, requires, id, caption, filter_source)
+            return lambda callback: self._add(kind, name, callback, requires, id, caption, interactive_filter)
         if not callable(fn):
             raise ValueError("output callback must be callable")
         output_id = id
@@ -286,14 +287,15 @@ class Registry:
             output_id = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "graph"
         if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_-]*", output_id):
             raise ValueError("output IDs must be filename-safe letters, digits, underscores, or hyphens")
-        self._outputs.append(_Output(kind, output_id, name, fn, _requirements(requires), caption, filter_source))
+        self._outputs.append(_Output(kind, output_id, name, fn, _requirements(requires), caption, interactive_filter))
         return fn
 
     def graph(self, name, fn=None, *, requires=None, id=None):
         """Register ``fn(data) -> matplotlib.figure.Figure``.
 
-        ``name`` is the display title. ``requires(treatments)`` returns the
-        treatments needed by this output. Omit it to select the whole catalog.
+        ``name`` is the display title. ``requires(treatments)`` selects the
+        treatments needed by this output before collection. Omit it to select
+        the whole catalog. Interactive filtering never changes this selection.
         A mapping of named selector functions supports comparisons. Selectors
         receive read-only dictionaries and must return members of the catalog.
         ``run`` passes only this output's selected observations to the callback.
@@ -304,20 +306,24 @@ class Registry:
         """
         return self._add("graph", name, fn, requires, id)
 
-    def table(self, name, fn=None, filter_source=None, *, caption=None, requires=None, id=None):
+    def table(self, name, fn=None, interactive_filter=None, *, caption=None, requires=None, id=None):
         """Register ``fn(data) -> list[dict]``; row keys are column headings.
 
         Cells can be scalars or styled ``{"text": ..., "style": ...}`` values.
-        ``filter_source(filtered_rows, data) -> data`` returns a dictionary
-        with raw tables narrowed to matching rows.
-        Filters are chained in registration order. ``caption`` is shown below
-        the table in the terminal and browser. ``requires`` works as in :meth:`graph`.
+        ``interactive_filter(filtered_rows, data) -> data`` propagates browser
+        selections to raw tables. It receives shared data across all outputs,
+        after raw-table filters and preceding interactive filters, and returns
+        a dictionary with tables narrowed to matching rows. Preserve other
+        tables and metadata with ``{**data, ...}``. Filters chain in registration
+        order and never collect data. ``caption`` is shown below the table in
+        the terminal and browser. ``requires`` works as in :meth:`graph` and
+        limits the rendering callback's data, not the interactive filter's data.
         ``id`` defaults to the function name and controls filenames and ``--only``.
         Lambdas and callables without names use a slug of the display title.
         Set ``id`` explicitly when registering the same function more than once.
         ``@reg.table(name, ...)`` is the equivalent decorator form.
         """
-        return self._add("table", name, fn, requires, id, caption, filter_source)
+        return self._add("table", name, fn, requires, id, caption, interactive_filter)
 
     def macros(self, name, fn=None, *, requires=None, id=None):
         """Register ``fn(data) -> {LaTeXMacroName: scalar_value}``.
@@ -362,7 +368,7 @@ class Registry:
             if output.kind == "macros":
                 def fn(data, render=fn):
                     return [{"macro": name, "value": value} for name, value in render(data).items()]
-            result.append((output.title, fn, output.filter_source, output.caption))
+            result.append((output.title, fn, output.interactive_filter, output.caption))
         return result
 
     def _bind(self, selections):
@@ -377,12 +383,8 @@ class Registry:
                 default = {} if output.kind == "macros" else [] if output.kind == "table" else None
                 return self._invoke(output.title, output.render, _scoped_data(data, scope), default=default)
 
-            def narrow(rows, data, output=output, scope=scope):
-                narrowed = output.filter_source(rows, _scoped_data(data, scope))
-                return {**data, **narrowed}
-
             bound._add(output.kind, output.title, render, None, output.id, output.caption,
-                       narrow if output.filter_source else None)
+                       output.interactive_filter)
         return bound
 
     def run_graphs(self, data):
@@ -424,7 +426,7 @@ class Registry:
         """Run all registered table functions and return their rows.
 
         Returns a list of ``{"name": str, "rows": list[dict],
-        "has_filter_source": bool, "caption": str|None}`` dicts.  Called by the
+        "has_interactive_filter": bool, "caption": str|None}`` dicts.  Called by the
         JS engine.
         """
         results = []
@@ -432,7 +434,7 @@ class Registry:
             results.append({
                 "name": name,
                 "rows": self._invoke(name, fn, data, default=[]),
-                "has_filter_source": fs is not None,
+                "has_interactive_filter": fs is not None,
                 "caption": caption,
             })
         return results
@@ -449,7 +451,7 @@ class Registry:
         return console_renderer.render(self._tables, data, console, names=tables)
 
     def apply_table_filters(self, table_filters, data):
-        """Chain filter_source functions for all filtered computed tables.
+        """Chain interactive_filter functions for all filtered computed tables.
 
         Called by the JS engine when the user filters one or more computed
         tables.
@@ -460,15 +462,15 @@ class Registry:
             Each entry is ``{"name": str, "filtered_rows": list[dict]}``
             representing a computed table whose text filter is active.
         data : dict
-            The original (unfiltered) data dict passed in by the JS
-            engine.  Each ``filter_source`` is called in registration
-            order, and each one receives the data already narrowed by
-            the previous ``filter_source`` calls.
+            Shared data across all outputs, after raw-table filters. Each
+            ``interactive_filter`` is called in registration order and receives
+            data already narrowed by preceding interactive filters. ``requires``
+            does not restrict the data passed to these callbacks.
 
         Returns
         -------
         dict
-            A new data dict with raw rows narrowed by each filter_source
+            A new data dict with raw rows narrowed by each interactive_filter
             function in registration order.
         """
         filtered_data = data

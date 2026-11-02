@@ -20,7 +20,7 @@ def narrow_summary(rows, data):
             if (row["algorithm"], row["size"]) in keys]}
 
 
-@reg.table("Summary", requires={"current": current}, filter_source=narrow_summary,
+@reg.table("Summary", requires={"current": current}, interactive_filter=narrow_summary,
            caption="Median time for 200 lookups; lower is better.")
 def summary(data):
     """Compute medians from flat observations, including empty filtered data."""

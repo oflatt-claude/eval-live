@@ -843,6 +843,60 @@ class EvaluationTests(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
+    def test_interactive_filter_propagates_across_commits_with_separate_requirements(self):
+        reg = eval_live.Registry()
+        measurements = [{"run_id": f"{revision}-{size}", "size": size, "seconds": seconds}
+                        for revision in ("old", "new") for size, seconds in ((10, 1), (20, 4))]
+        data = {
+            "measurements": measurements,
+            "eval_runs": [{"run_id": row["run_id"], "config_id": row["run_id"].split("-")[0]}
+                          for row in measurements],
+            "eval_configs": [{"config_id": revision} for revision in ("old", "new")],
+            "eval_requirements": [{"requirement": "saved"}],
+            "eval_selections": [{"requirement": "saved", "run_id": row["run_id"]}
+                                for row in measurements],
+        }
+        snapshot = json.dumps(data, sort_keys=True)
+
+        def narrow(rows, shared):
+            sizes = {row["size"] for row in rows}
+            return {**shared, "measurements": [row for row in shared["measurements"]
+                                               if row["size"] in sizes]}
+
+        @reg.table("Current", requires=lambda ts: ts, interactive_filter=narrow)
+        def current(data):
+            return data["measurements"]
+
+        @reg.table("Comparison", requires={"baseline": lambda ts: ts, "candidate": lambda ts: ts})
+        def comparison(data):
+            return [{"revision": revision, "size": row["size"]}
+                    for revision in ("baseline", "candidate")
+                    for row in eval_live.select(data, revision)["measurements"]]
+
+        bound = reg._bind({"current": {"data": ["new-10", "new-20"]},
+                           "comparison": {"baseline": ["old-10", "old-20"],
+                                          "candidate": ["new-10", "new-20"]}})
+        current_rows = bound.run_tables(data)[0]["rows"]
+        self.assertEqual([row["run_id"] for row in current_rows], ["new-10", "new-20"])
+        # A measured value can select sizes, then propagate them across commits.
+        for cutoff, sizes in ((2, [10]), (0, [])):
+            with self.subTest(cutoff=cutoff):
+                filtered = bound.apply_table_filters([
+                    {"name": "Current", "filtered_rows": [row for row in current_rows
+                                                           if row["seconds"] < cutoff]},
+                ], data)
+                self.assertEqual([row["run_id"] for row in filtered["measurements"]],
+                                 [f"{revision}-{size}" for revision in ("old", "new") for size in sizes])
+                rendered = bound.run_tables(filtered)
+                self.assertEqual([row["run_id"] for row in rendered[0]["rows"]],
+                                 [f"new-{size}" for size in sizes])
+                self.assertEqual(rendered[1]["rows"],
+                                 [{"revision": revision, "size": size}
+                                  for revision in ("baseline", "candidate") for size in sizes])
+                for name in data.keys() - {"measurements"}:
+                    self.assertEqual(filtered[name], data[name])
+        self.assertEqual(json.dumps(data, sort_keys=True), snapshot)
+
     def test_browser_module_supports_registration_without_collection_imports(self):
         module = ModuleType("standalone_eval_live")
         with patch.dict(sys.modules, {module.__name__: module}):
@@ -876,7 +930,7 @@ class RegistryTests(unittest.TestCase):
         rendered = reg.run_tables(filtered)
         self.assertEqual(rendered[0]["rows"], [{"value": 2, "sample": 0}])
         self.assertEqual(rendered[0]["caption"], "Original signature")
-        self.assertTrue(rendered[0]["has_filter_source"])
+        self.assertTrue(rendered[0]["has_interactive_filter"])
         with tempfile.TemporaryDirectory() as temporary:
             paths = reg.render_to_dir(filtered, temporary, fmt="svg", dpi=72)
             self.assertTrue(all(isinstance(path, str) for path in paths))

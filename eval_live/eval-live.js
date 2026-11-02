@@ -133,7 +133,7 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
       // unchecking a value doesn't make it disappear as the display narrows.
       const unfiltered = state.engine.computedUnfiltered.find((u) => u.name === t.name);
       const optionRows = unfiltered ? unfiltered.rows : t.rows;
-      const view = buildTableView(t.name, t.rows, "computed", t.hasFilterSource,
+      const view = buildTableView(t.name, t.rows, "computed", t.hasInteractiveFilter,
                                   t.caption, handlers, optionRows);
       computedViews.push(view);
       computedContainer.appendChild(view.section);

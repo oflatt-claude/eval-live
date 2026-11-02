@@ -37,7 +37,7 @@ data = {}
 rt = reg.run_tables(data)
 check("run_tables one entry per registered table", len(rt) == 2)
 check("run_tables carries caption", rt[0]["caption"] == "Ratio is target / baseline.")
-check("run_tables has_filter_source False", rt[0]["has_filter_source"] is False)
+check("run_tables has_interactive_filter False", rt[0]["has_interactive_filter"] is False)
 check("run_tables has no columns key", "columns" not in rt[0])
 
 # columns/headers are just the row keys, in first-seen order

@@ -38,13 +38,13 @@ const pyodide = {
     const data = globals.get("__eval_live_data__");
     if (source.includes(".run_messages(")) {
       return proxy([{ name: "Warnings", rows: [{ message: "Some treatments timed out" }],
-                      has_filter_source: false, caption: null }]);
+                      has_interactive_filter: false, caption: null }]);
     }
     if (source.includes(".run_tables(")) {
       return proxy([{ name: "Summary", rows: data.samples.map((row) => ({
                         ...row, styled: { text: row.id, style: { bold: true } },
                       })),
-                      has_filter_source: true, caption: "Sample IDs" }]);
+                      has_interactive_filter: true, caption: "Sample IDs" }]);
     }
     if (source.includes(".run_graphs(")) {
       return proxy([{ name: "Samples", src: "data:image/png;base64," + data.samples.length }]);
