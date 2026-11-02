@@ -12,9 +12,11 @@ To adopt collection and caching:
    It returns named flat tables. Split repeated samples and nested timing
    summaries into rows, and declare inputs, helper dependencies, tool versions,
    and measurement parameters.
-2. Add ``requires=`` to existing ``reg.graph`` and ``reg.table`` calls. It takes
-   a ``RunRequest``, a list, or named requirements for comparisons. Callbacks
-   still receive ``data``; filters still return narrowed data dictionaries.
+2. Pass configuration dictionaries as ``treatments=`` to ``reg.benchmark``.
+   Outputs use all declared treatments by default. Add ``requires=selector``
+   to existing graph/table registrations when only a subset is needed; the
+   Python function returns catalog members. Named selector functions support
+   comparisons. Callbacks still receive ``data``; filters return narrowed data.
 3. Use ``add_arguments`` with ordinary argparse options and pass resolved args
    plus original tokens to ``reg.run``. Guard execution inside ``main`` for
    browser imports; registration itself does not run benchmarks.
@@ -30,10 +32,15 @@ For example, only registration and execution change for an existing callback:
        return [{"samples": len(data["measurements"])}]
 
    reg = eval_live.Registry()
-   reg.benchmark("worker", collect, version="1", inputs=["worker.py"])
-   reg.table("Summary", summary,
-             requires=eval_live.RunRequest("worker", samples=args.samples))
+   reg.benchmark("worker", collect, version="1", inputs=["worker.py"],
+                 treatments=[{"sample": i} for i in range(args.samples)])
+   reg.table("Summary", summary)
    reg.run(args=args, argv=tokens)
+
+The script defines its own ``--samples`` argument. Both that CLI count and
+the individual treatment's sample index affect cache identity by default.
+Compute averages in callbacks. The declared ``version`` is saved with every
+observation and invalidates reuse when changed.
 
 Use ``reg.macros`` for paper numbers. For cross-commit comparisons, name the
 requirements and call ``eval_live.select(data, "baseline")`` inside the

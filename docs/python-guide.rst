@@ -1,43 +1,32 @@
 Writing a paper evaluation
 ==========================
 
-The complete example is ``demo/eval.py``. It creates a tiny local repository
-with two commits, measures list/set membership, and defines a catalog of
-figures, a table, and LaTeX macros. No compiler or external clone is needed.
+Use one ``Registry`` for the collection callback and the paper's graphs,
+tables, and macros. ``demo/eval.py`` is a complete single-script example:
 
 .. code-block:: bash
 
    pip install -e '.[render,docs]'
    python demo/eval.py
-   python demo/eval.py                         # all samples reused
-   python demo/eval.py --dry-run               # show requirements and cache hits
-   python demo/eval.py --samples 5             # collect only additional samples
+   python demo/eval.py                         # reuse the saved results
+   python demo/eval.py --dry-run               # inspect selected treatments
    python demo/eval.py --only summary --sizes 500
-   python demo/eval.py --seed 7                # new measurement configuration
-   python demo/eval.py --force                 # fresh samples, retaining history
+   python demo/eval.py --samples 5             # a new CLI configuration
+   python demo/eval.py --timeout 60            # retry eligible timeouts
+   python demo/eval.py --render-only           # regenerate from saved selections
 
-The default output directory is ``demo/out/paper``. It contains one
-``results.json`` data/cache file, ``runtime.pdf``, ``history.pdf``,
-``summary.tex``, ``macros.tex``, and ``index.html``. The ``.lock`` sibling is
-operational state, not another data store. Open the HTML file directly. Graphs
-and computed tables load Pyodide/matplotlib from a pinned CDN; raw tables work
-without it. The browser only renders saved data and never runs benchmarks.
+The demo creates a tiny local Git repository with two commits. No clone or
+compiler is needed. It writes one ``demo/out/paper/results.json`` data/cache
+file plus ``runtime.pdf``, ``history.pdf``, ``summary.tex``, ``macros.tex``, and
+``index.html``. The sibling lock file is writer coordination, not stored data.
+A first-ever dry-run requires initializing the fixture by running the demo.
 
-The generated fixture lives in ``demo/out/repository``. The first invocation
-creates it; subsequent invocations use it. A first-ever ``--dry-run`` asks you
-to initialize the fixture by running the demo first, so dry-run itself never
-writes. Lookup timings exclude container construction and illustrate usage,
-rather than constituting a rigorous performance study.
+Declare treatments and a collection callback
+--------------------------------------------
 
-Declare benchmark observations
-------------------------------
-
-A callback registered with ``reg.benchmark`` receives a ``RunContext`` and
-returns named flat user tables. Each call represents one observation. The library adds
-``run_id`` to every returned row and joins it to commit, configuration,
-status, and environment metadata. Use scalar cells; repeated values belong
-in separate rows. Tables beginning with ``eval_`` and the ``run_id`` column
-are reserved.
+A treatment is an ordinary configuration dictionary. Declare the finite set
+you know how to run, using a list, comprehension, or ``itertools.product``.
+Each selected treatment invokes the registered callback once:
 
 .. code-block:: python
 
@@ -45,106 +34,97 @@ are reserved.
        import json
        import sys
        result = context.command([
-           sys.executable, "worker.py", str(context.config["size"])
+           sys.executable, "worker.py", context.config["suite"],
+           str(context.config["size"]),
        ])
        return {"measurements": [json.loads(result.stdout)]}
 
    reg = eval_live.Registry()
-   reg.benchmark("worker", collect, version="1", inputs=["worker.py"], timeout=60)
+   reg.benchmark(
+       "worker", collect, version="1", inputs=["worker.py"],
+       treatments=[{"suite": suite, "size": size}
+                   for suite in ("a", "b") for size in (100, 1000)],
+   )
 
-``context.directory`` is the requested Git revision in a temporary detached
-worktree. ``context.config`` holds the request parameters; ``context.sample``
-is a monotonically increasing attempt index for that identity.
-``context.command`` runs without a shell and records the command, duration,
-exit code, stdout, and stderr. Nonzero exits and timeouts raise
-``ProcessError``. Its timeout is per subprocess; arbitrary Python callbacks
-are not preempted. ``run_command`` exposes the same helper separately, without
-automatic persistence.
+The callback returns named flat tables. Cells contain scalars; repeated values
+belong in separate rows. ``eval_`` table names and the ``run_id`` column are
+reserved. The library adds ``run_id`` to link every returned row to the full
+treatment, CLI configuration, commit, data version, and diagnostics.
 
-Declare measurement helpers with ``reg.benchmark(..., dependencies=[...])``
-and external input files/directories in ``inputs``. Relative inputs are read at
-the target commit; absolute inputs are hashed from the local filesystem.
-Declare toolchain/dependency versions with ``tools`` and environment variables
-with ``environment``. If behavior depends on undeclared global values or
-external services, explicitly version those dependencies or include them in
-configuration. The library cannot infer their identity from callback source.
+``context.config`` holds the treatment fields. ``context.directory`` contains
+the requested Git revision in a temporary detached worktree. Commands run
+there by default, without a shell, and record argv, duration, exit status,
+stdout, and stderr. Nonzero exits and timeouts raise ``ProcessError``.
+``run_command`` also exposes this subprocess helper separately.
 
-An optional ``build(context) -> Path`` prepares a binary. It receives
-the registered ``build_config`` as its configuration; measurement callbacks
-receive their own request configuration. Builds are shared across requests with the
-same target, build code/configuration, inputs, and environment. The binary is
-available as ``context.binary`` and its hash is saved. An entirely cached run
-performs no build or worktree creation.
+``repository`` defaults to the current directory. ``commit`` defaults to the
+CLI's ``--commit`` (HEAD by default). Treatments can override either field.
+Selectors see those fields and ``benchmark`` alongside the treatment's own
+parameters; these three reserved fields are omitted from ``context.config``.
+Refs resolve to full SHAs before cache lookup. ``WORKTREE`` explicitly selects
+working files; dirty collection requires ``--allow-dirty`` and bypasses reuse.
 
-Describe outputs and their data requirements
---------------------------------------------------------
+Declare helper functions with ``dependencies``, external files/directories
+with ``inputs``, toolchain versions with ``tools``, and execution variables
+with ``environment``. Relative input paths are read at the target commit;
+absolute inputs are hashed from the filesystem. The library cannot infer
+undeclared globals, dependencies, or external services.
 
-A ``RunRequest`` identifies one benchmark, Git ref, configuration, and required
-sample count. Resolve arbitrary refs to full SHAs before looking up results.
-Use ``HEAD`` for committed files, even when the current checkout is dirty.
-``WORKTREE`` explicitly requests current working files; dirty working-tree
-collection requires ``--allow-dirty`` and is never reusable.
+An optional ``build(context) -> Path`` receives ``build_config`` and prepares
+``context.binary``. Builds share work across compatible treatments in an
+invocation. Entirely cached evaluations perform no builds or worktree creation.
+
+Select treatments with ordinary Python
+--------------------------------------
+
+An output's ``requires(treatments)`` function returns the treatments it needs.
+It receives all registered treatments as read-only dictionaries. Return
+members of that catalog, or equivalent copies; invented configurations are
+rejected. Lists, generators, comprehensions, and reusable functions all work.
+Omitting ``requires`` selects the whole catalog. No selection DSL is needed.
 
 .. doctest::
 
    >>> import eval_live
-   >>> candidate = eval_live.RunRequest("worker", config={"size": 100}, samples=3)
-   >>> candidate.commit
-   'HEAD'
-   >>> candidate.config["size"]
-   100
-
-Keep the original registration style. Add ``requires=`` to declare the data
-an output needs. It accepts one request, a list of requests, or a dictionary
-of named requirements. The planner deduplicates identical requests, taking
-the maximum sample count needed across outputs.
+   >>> treatments = [{"suite": suite, "size": size} for suite in ("a", "b", "c") for size in (10, 100)]
+   >>> needed = lambda ts: [t for t in ts if t["suite"] in {"a", "b"}]
+   >>> [t["size"] for t in needed(treatments)]
+   [10, 100, 10, 100]
 
 .. code-block:: python
 
-   def timings(data):
-       return data["measurements"]
+   def summary(data):
+       return [{"observations": len(data.get("measurements", []))}]
 
-   reg.table("Timings", timings, requires=candidate)
+   reg.table("Selected suites", summary, requires=needed)
+   reg.table("All treatments", summary)  # everything declared
    reg.run(args=args, argv=tokens)
 
-Callbacks still receive ordinary dictionaries of named flat tables. During
-``reg.run``, those tables contain only the observations selected for that
-output, with duplicates removed. ``eval_runs`` and ``eval_configs`` provide
-provenance; ``eval_selections`` identifies each named requirement by
-``requirement`` and ``run_id``. These callback selection rows describe this
-output alone. Rows are copied so rendering cannot change the stored snapshot.
+Only selected outputs' selectors are evaluated. Their results are combined
+and deduplicated before collection. Overlapping selections and equivalent
+treatments share one cached observation. An explicit empty selection requires
+no collection and remains replayable later.
 
-A graph callback returns a matplotlib Figure; a table callback returns a list
-of row dictionaries, including the existing styled presentation cells.
-``reg.macros(name, fn, requires=...)`` registers a callback returning a mapping
-from LaTeX macro names (letters only) to scalar values. Values are escaped;
-duplicate macro names across selected outputs are errors.
+Callbacks keep the original Registry interface: ordinary dictionaries of
+named tables. During ``reg.run`` they contain precisely the observations
+selected for that output. ``eval_runs`` and ``eval_configs`` provide provenance.
+``eval_requirements`` names its requirements, including empty ones, while
+``eval_selections`` links names to run IDs. Rows are copied so callbacks cannot
+change the saved snapshot.
 
-The display name's slug determines filenames and ``--only`` IDs: ``"Runtime
-comparison"`` becomes ``runtime-comparison``. Set ``id="runtime"`` explicitly
-to keep filenames stable when renaming a display title. IDs must be unique
-and contain only letters, digits, underscores, or hyphens.
-
-For comparisons, give requirements names and use ``select`` to extract one:
+For comparisons, name selector functions and use ``select(data, name)``:
 
 .. code-block:: python
 
-   def compare(data):
-       baseline = eval_live.select(data, "baseline")
-       candidate = eval_live.select(data, "candidate")
-       return [{"baseline_samples": len(baseline["measurements"]),
-                "candidate_samples": len(candidate["measurements"])}]
-
-   reg.table("Comparison", compare, requires={"baseline": old, "candidate": new})
-
-Each name can refer to one request or a sweep over several configurations and
-commits. A callback's ordinary tables contain their union. ``select`` returns
-copies restricted to the named requirement:
+   reg.graph("History", history, requires={
+       "baseline": lambda ts: [t for t in ts if t["commit"] == "v1"],
+       "candidate": lambda ts: [t for t in ts if t["commit"] == "HEAD"],
+   })
 
 .. doctest::
 
-   >>> snapshot = {"measurements": [{"run_id": "sample-a", "seconds": 0.2}],
-   ...             "eval_selections": [{"requirement": "candidate", "run_id": "sample-a"}]}
+   >>> snapshot = {"measurements": [{"run_id": "a", "seconds": 0.2}],
+   ...             "eval_selections": [{"requirement": "candidate", "run_id": "a"}]}
    >>> candidate_data = eval_live.select(snapshot, "candidate")
    >>> candidate_data["measurements"][0]["seconds"]
    0.2
@@ -152,139 +132,122 @@ copies restricted to the named requirement:
    >>> len(snapshot["measurements"])
    1
 
-Import matplotlib inside graph callbacks so table-only imports remain
-lightweight. Handle empty data after browser filtering. Rendering callbacks
-must not collect measurements or require files from the benchmark checkout.
+Graphs return matplotlib Figures; tables return lists of row dictionaries,
+including styled cells. ``reg.macros(name, fn)`` registers a callback returning
+LaTeX macro names and scalar values. Macro names contain letters only; values
+are escaped. Filenames and ``--only`` use the display name's slug, or explicit
+``id=`` values. Output IDs and titles must be unique for ``reg.run``.
 
-Registrations without ``requires`` still work with ``run_tables(data)``,
-``run_graphs(data)``, and the terminal/directory renderers: these methods use
-the data supplied by the caller and never collect. During ``reg.run``, an
-output without requirements receives no observations, which is useful for
-static output. The file renderer is shared by both paths; ``reg.run`` keeps
-all stored data in one JSON file, while ``render_to_dir`` preserves its table
-JSON sidecars for existing scripts.
+Repetitions, keys, and CLI configuration
+----------------------------------------
 
-Here is the demo's actual catalog and entry point:
+Repetitions are ordinary treatments. The script owns its repetition option:
 
-.. literalinclude:: ../demo/eval.py
-   :language: python
-   :pyobject: main
+.. code-block:: python
 
-CLI and cache behavior
-----------------------
+   parser = eval_live.add_arguments(argparse.ArgumentParser())
+   parser.add_argument("--samples", type=int, default=5)
+   args = parser.parse_args(tokens)
+   reg.benchmark("solver", run_solver, version="1", treatments=[
+       {"suite": suite, "sample": i}
+       for suite in suites for i in range(args.samples)
+   ])
 
-``add_arguments(parser)`` adds standard options. The script owns ordinary
-``argparse`` parsing and uses ``args.samples`` and ``args.commit`` in requests.
-``reg.run(args=args, argv=tokens)`` stores every resolved option,
-including defaults, and the exact original argument token sequence.
+There is no library sample counter or statistics API. ``sample`` is just a
+user-defined treatment field. A callback can compute means, medians, or any
+other aggregate across the selected rows using ordinary Python.
 
-All script-specific options affect cache identity by default. Declare
-selection-only options with ``selection_arguments``. For example, the demo
-excludes the whole ``sizes`` list because each request already contains its
-individual size. This lets a subset reuse measurements from a full sweep.
-Output location, artifact selection, sample count, and other standard control
-options do not affect individual observation identity. All are still saved.
-A shared data file can be used with another artifact directory:
+All measurement-affecting CLI options participate in cache identity by default,
+including a script's ``--samples`` count. Both the total count and the individual
+sample index distinguish results. Changing five samples to ten therefore
+collects ten fresh observations per configuration; repeating ten reuses them.
+Every resolved argument/default and original argv token is saved.
 
-.. code-block:: bash
+Standard output/selection controls such as ``--output`` and ``--only`` do not
+change measurements. Paper-specific exclusions must be declared explicitly
+with ``Registry(selection_arguments=[...])``. The demo excludes the whole
+``sizes`` list because each individual size is already a treatment field. It
+keeps the total sample count in the configuration key.
 
-   python demo/eval.py --only summary --data demo/out/paper/results.json --output demo/out/summary
+The cache also includes repository/full commit, collection and declared helper
+code, declared data version, input hashes, and relevant environment/tool
+settings. Equivalent treatments deduplicate even when returned by different
+selectors. Plot code and selectors do not affect measurement identity.
 
-Cache identity includes repository identity, full SHA, measurement callback
-and declared helper code, explicit protocol version, configuration, declared
-input hashes, and environment/tool metadata. Changing plot code or
-labels does not invalidate observations. Sample count is a minimum: raising
-three to five collects two more. ``--force`` appends fresh attempts without
-deleting old results. Exact selected sample IDs are stored for every artifact.
+A treatment plus CLI configuration and commit identifies what to collect. A
+table that stores multiple rows for that treatment may additionally distinguish
+rows by phase or another domain key. ``run_id`` links rows to the recorded
+attempt; forced runs retain history. Derived averages can group away the sample
+field. These table-specific choices belong to the paper's callbacks.
 
-``--only`` selects artifact IDs before collection. ``--benchmarks`` restricts
-allowed benchmark names; it errors if that would remove a required dependency.
-``--dry-run`` prints cached/missing work and its reasons without writes, builds,
-or measured commands. Collection is sequential. Failed attempts stop further
-samples for that request, while independent requests continue. Failures remain
-in the data file and raise ``CollectionError`` after complete independent
-outputs are rendered. Interrupted attempts are recorded and can be retried;
-completed observations survive restarts.
+Version the collected tables
+----------------------------
 
-Timeouts and retries
---------------------
+``reg.benchmark(..., version="2")`` declares the data format/measurement protocol
+version for the tables that callback returns. It is stored explicitly in
+``eval_runs.data_version`` and included in the runner fingerprint. Bump it when
+tables change shape or meaning, or when an otherwise undeclared protocol change
+requires recollection. Existing observations retain their original version;
+new invocations select data using the current identity. Changes to rendering
+alone reuse data. This version is independent of the JSON container's schema.
 
-Set a per-command deadline with ``reg.benchmark(..., timeout=60)``. The
-shared ``--timeout`` option overrides it for all selected benchmarks, including
-build commands. Timeouts kill the command's process group on POSIX and record
-the attempt as ``timed-out`` with its stdout/stderr. Arbitrary Python callbacks
-are not preempted; run bounded work through ``context.command``.
+Timeouts, failures, and replay
+------------------------------
 
-.. code-block:: bash
-
-   python demo/eval.py --timeout 10
-   python demo/eval.py --timeout 60  # reuse successes; retry timed-out work
+``timeout=60`` on a benchmark sets a deadline per command; ``--timeout`` overrides
+it. Timeouts terminate the process group on POSIX and preserve captured output.
+Arbitrary Python callbacks are not preempted; use ``context.command`` for work
+that needs a deadline. Collection is sequential, checkpoints every attempt,
+and continues independent treatments after failures.
 
 Timeout is a retry bound, separate from measurement identity. Increasing it
-keeps successful observations and makes timed-out requests eligible to collect
-their missing samples. The newest applicable attempts satisfy the requested
-sample count; older successes can fill it after a timeout becomes inapplicable.
-An equal or smaller limit leaves cached timeouts blocked. Ordinary failures
-also block automatic retries; ``--force`` collects fresh attempts regardless
-of the cache. Changing the benchmark's default timeout follows the same rule
-as changing the CLI option.
+preserves successes and permits retries of timed-out treatments. An equal or
+smaller limit leaves cached timeouts blocked. Ordinary failures require
+``--force``. The newest applicable attempt determines reuse; older successes
+can be reused when a more recent timeout becomes inapplicable. A shorter
+limit accepts a success only if its saved total duration fits (conservatively
+including setup/build time). Each attempt keeps its original deadline.
 
-Successes are reusable at an equal or larger deadline. For a smaller deadline,
-the saved total attempt duration must fit. That duration includes setup and
-build time, so this check is conservative. Each attempt retains its original
-deadline, status, and duration; the new invocation records the requested limit
-separately. A dry-run displays the effective deadline and any cached failures
-blocking collection. If timeout changes the algorithm itself, also put that
-algorithm parameter in the request configuration.
+``--force`` collects fresh observations while retaining history. Incomplete
+collection raises ``CollectionError`` after saving failures and rendering
+independent outputs. Interrupted attempts can be retried.
 
-Re-render a saved evaluation
---------------------------------------------
+``--render-only`` uses the latest successful invocation, or ``--invocation ID``.
+It replays saved selections, including empty requirements, without evaluating
+selectors, resolving Git refs, or collecting. The rendering script and its
+dependencies must remain available. Use ``--only`` when replaying an invocation
+that contained only a subset of outputs. ``--data PATH`` shares a cache across
+output directories; use separate directories for subset reports because old
+unrelated generated files remain in place.
 
-.. code-block:: bash
+The original ``run_tables(data)``, ``run_graphs(data)``, terminal renderer, and
+``render_to_dir(data, path)`` still use data supplied by the caller and never
+collect. The directory renderer preserves table JSON sidecars; ``reg.run``
+writes all evaluation data to one JSON file.
 
-   python demo/eval.py --render-only
-   python demo/eval.py --render-only --invocation SAVED_ID
+Interactive reports
+-------------------
 
-Render-only uses the latest successful invocation by default, or the explicit
-invocation's selected sample IDs. It does not resolve Git refs, inspect inputs,
-build, or collect, and works when the benchmark repository has been removed.
-The script defining callbacks and required rendering dependencies must still
-be available. A missing artifact/requirement in that saved selection is an
-error; use ``--only`` or choose an invocation containing it. Render-only records
-its own arguments and links to the source invocation.
+The HTML uses the same rendering callbacks and saved selections. Rendering
+and filter callbacks must be named top-level functions in one source file,
+or supply ``browser_source=Path(__file__)`` explicitly. Keep execution under
+``if __name__ == '__main__'`` and execution-only imports inside collection
+callbacks or the entry point. Registration is safe during browser imports.
+Treatment selectors can be lambdas or closures: replay does not execute them.
 
-Generated files are replaced individually; unrelated old files in an output
-directory are left alone. Use a separate output directory for subset reports.
-An invocation with incomplete requirements is unsuccessful and may leave
-previously generated files in place; inspect its error/status before using
-outputs. The JSON file is validated and atomically checkpointed independently
-of artifact generation.
-
-Interactive callbacks
----------------------
-
-The library embeds the same artifact callbacks and data in HTML. By default,
-callbacks must be named top-level functions from one source file. Set
-``browser_source=Path(__file__)`` explicitly, or provide a Python source string
-with those functions. The source is imported as a module: a normal
-``if __name__ == '__main__'`` guard keeps collection local. Put execution-only
-imports inside benchmark callbacks or the entry point.
-Registration itself is safe in the browser: ``Registry``, ``RunRequest``, and
-``select`` work without importing collection code. Refer to the demo's
-``import eval_live`` pattern.
-
-A table's optional ``filter_source(rows, data)`` keeps the original Registry
-contract: return a data dictionary with raw tables narrowed to the visible
-computed rows. Its input is scoped to that table's selected observations.
-Filters are chained in registration order, and the viewer recomputes tables
-and graphs using the narrowed data. Preserve metadata with ``{**data, ...}``
-when replacing measurement tables, as in the demo:
+``filter_source(rows, data)`` keeps the original contract: return a data
+dictionary with raw tables narrowed to visible computed rows. Preserve metadata
+with ``{**data, ...}`` when replacing tables. Filters chain in registration order.
+Handle empty filtered data in graph/table callbacks.
 
 .. literalinclude:: ../demo/eval.py
    :language: python
    :pyobject: narrow_summary
 
-The browser runtime and its packages come from the `Pyodide CDN
-<https://pyodide.org/en/stable/usage/quickstart.html#setup>`_. These are needed
-for interactive Python outputs; the page embeds the raw data and the viewer's
-JavaScript/CSS. HTML generation escapes data embedded in script elements.
+Open the HTML directly. Raw tables need no Python runtime; computed tables and
+graphs fetch Pyodide and matplotlib from a pinned CDN. The browser never runs
+benchmarks. The demo's complete registry setup is:
+
+.. literalinclude:: ../demo/eval.py
+   :language: python
+   :pyobject: main

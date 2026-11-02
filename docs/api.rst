@@ -5,13 +5,11 @@ Registry
 --------
 
 One registry holds benchmarks and outputs. Add ``requires=`` to the existing
-``graph`` and ``table`` methods to opt into collection; callbacks continue to
+``graph`` and ``table`` methods to select treatments with Python functions.
+Without a selector an output uses the entire catalog. Callbacks continue to
 receive ordinary data dictionaries. ``macros`` adds LaTeX definitions.
 
 .. autoclass:: eval_live.Registry
-   :members:
-
-.. autoclass:: eval_live.RunRequest
    :members:
 
 .. autofunction:: eval_live.select
@@ -21,8 +19,8 @@ receive ordinary data dictionaries. ``macros`` adds LaTeX definitions.
 Benchmark callbacks
 -------------------
 
-``Registry.benchmark(name, fn, version=..., **options)`` accepts the options
-listed on ``Benchmark``. Scripts register directly on their registry; they do
+``Registry.benchmark(name, fn, treatments=..., version=..., **options)`` accepts
+the collection options listed on ``Benchmark``. Scripts register directly on their registry; they do
 not need to construct benchmark objects separately.
 
 .. autoclass:: eval_live.Benchmark

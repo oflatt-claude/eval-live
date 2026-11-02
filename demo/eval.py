@@ -78,9 +78,9 @@ def membership(context):
 
     result = context.command([
         sys.executable, "membership.py", str(context.config["size"]),
-        context.config["algorithm"], str(context.config["seed"] + context.sample),
+        context.config["algorithm"], str(context.config["seed"] + context.config["sample"]),
     ])
-    return {"measurements": [json.loads(result.stdout)]}
+    return {"measurements": [{**json.loads(result.stdout), "sample": context.config["sample"]}]}
 
 
 def make_repository(path):
@@ -135,8 +135,11 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--baseline", default="HEAD~1", help="baseline commit for the history figure")
     parser.add_argument("--repository", type=Path, default=Path(__file__).resolve().parent / "out" / "repository")
+    parser.add_argument("--samples", type=int, default=3, help="repetitions per configuration")
     tokens = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(tokens)
+    if args.samples < 1:
+        parser.error("--samples must be positive")
     if any(size <= 0 for size in args.sizes) or len(set(args.sizes)) != len(args.sizes):
         parser.error("--sizes must contain distinct positive integers")
     if not args.render_only:
@@ -145,21 +148,27 @@ def main(argv=None):
         if not args.dry_run:
             make_repository(args.repository)
 
-    def request(size, algorithm, commit):
-        return eval_live.RunRequest("membership", repository=str(args.repository), commit=commit,
-                                    config={"size": size, "algorithm": algorithm, "seed": args.seed},
-                                    samples=args.samples)
-
-    current = [request(size, algorithm, args.commit) for size in args.sizes for algorithm in ("list", "set")]
-    reg = eval_live.Registry(selection_arguments=["sizes", "repository"],
+    treatments = [
+        {"size": size, "algorithm": algorithm, "seed": args.seed, "commit": commit, "sample": sample}
+        for commit in (args.baseline, args.commit)
+        for size in args.sizes
+        for algorithm in ("list", "set")
+        for sample in range(args.samples)
+    ]
+    reg = eval_live.Registry(selection_arguments=["sizes", "repository", "baseline"],
                              browser_source=Path(__file__), title="Membership paper evaluation")
-    reg.benchmark("membership", membership, version="1", inputs=["membership.py"])
+    reg.benchmark("membership", membership, version="2", inputs=["membership.py"],
+                  treatments=treatments, repository=args.repository)
+
+    def current(treatments):
+        return [t for t in treatments if t["commit"] == args.commit]
+
     reg.graph("Runtime", runtime, requires={"current": current})
     reg.table("Summary", summary, requires={"current": current}, filter_source=narrow_summary,
               caption="Median time for 200 lookups; lower is better.")
     reg.graph("Commit comparison", history, id="history", requires={
-        "baseline": [request(size, "set", args.baseline) for size in args.sizes],
-        "candidate": [request(size, "set", args.commit) for size in args.sizes],
+        "baseline": lambda ts: [t for t in ts if t["commit"] == args.baseline and t["algorithm"] == "set"],
+        "candidate": lambda ts: [t for t in ts if t["commit"] == args.commit and t["algorithm"] == "set"],
     })
     reg.macros("Paper numbers", numbers, requires={"current": current}, id="macros")
     try:

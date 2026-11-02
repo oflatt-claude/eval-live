@@ -17,7 +17,7 @@ SCHEMA_VERSION = 1
 SYSTEM_TABLES = (
     "eval_metadata", "eval_invocations", "eval_argv", "eval_arguments",
     "eval_configs", "eval_environments", "eval_inputs", "eval_runs",
-    "eval_selections", "eval_processes", "eval_commands",
+    "eval_selections", "eval_requirements", "eval_processes", "eval_commands",
 )
 
 
@@ -159,6 +159,12 @@ class Store:
         if self.path.exists():
             try:
                 self.data = json.loads(self.path.read_text(encoding="utf-8"))
+                # Earlier schema-1 writers only stored nonempty selections.
+                if isinstance(self.data, dict) and "eval_requirements" not in self.data:
+                    keys = ("invocation_id", "artifact_id", "requirement")
+                    scopes = dict.fromkeys(tuple(row[key] for key in keys)
+                                          for row in self.data.get("eval_selections", []))
+                    self.data["eval_requirements"] = [dict(zip(keys, scope)) for scope in scopes]
                 self.validate()
             except (ValueError, TypeError, KeyError) as error:
                 raise ValueError(f"invalid or incompatible eval-live data in {self.path}: {error}") from error
@@ -232,8 +238,10 @@ class Store:
                 raise ValueError("run has no configuration or environment")
             if row["status"] not in ("running", "success", "failure", "timed-out", "interrupted"):
                 raise ValueError("invalid run status")
-            if type(row["sample"]) is not int or row["sample"] < 0:
-                raise ValueError("invalid sample index")
+            if "sample" in row and (type(row["sample"]) is not int or row["sample"] < 0):
+                raise ValueError("invalid legacy sample index")
+            if "data_version" in row and (not isinstance(row["data_version"], str) or not row["data_version"]):
+                raise ValueError("invalid data version")
             if not isinstance(row["cache_key"], str) or type(row["cacheable"]) is not bool:
                 raise ValueError("invalid cache identity")
             if type(row["dirty"]) is not bool or (row["dirty"] and row["cacheable"]):
@@ -258,7 +266,15 @@ class Store:
             if row["cache_key"] not in (expected, digest({**identity, "timeout": row["timeout"]})):
                 raise ValueError("cache identity does not match run provenance")
             run_keys[row["run_id"]] = expected
+        requirement_keys = ("invocation_id", "artifact_id", "requirement")
+        requirements = [tuple(row[key] for key in requirement_keys) for row in self.data["eval_requirements"]]
+        if len(set(requirements)) != len(requirements) or any(
+            not isinstance(value, str) or not value for key in requirements for value in key
+        ):
+            raise ValueError("invalid or duplicate output requirement")
         for row in self.data["eval_selections"]:
+            if tuple(row[key] for key in requirement_keys) not in requirements:
+                raise ValueError("selection has no output requirement")
             run = run_by_id[row["run_id"]]
             if run["status"] != "success":
                 raise ValueError("selection refers to an unsuccessful sample")
@@ -332,7 +348,7 @@ class Store:
         deadline: they block collection until forced or the bound increases.
         A success fits an equal/longer deadline, or a shorter one if its total
         recorded attempt duration fits. Running/interrupted attempts never block.
-        Callers take the newest requested number of these applicable rows.
+        The newest applicable row determines reuse or retry for a treatment.
         """
         eligible = []
         for row in self.runs(cache_key):

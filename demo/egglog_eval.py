@@ -46,7 +46,7 @@ def measure(context):
         raise ValueError("this example expects egglog timing-summary schema 4")
     return {
         "timings": [{"file": context.config["file"], "treatment": context.config["treatment"],
-                     "seconds": result.seconds, "timing_schema": summary["schema_version"]}],
+                     "seconds": result.seconds, "sample": context.config["sample"], "timing_schema": summary["schema_version"]}],
         "phases": [{"phase": name, "nanoseconds": value}
                    for name, value in summary.items() if name.endswith("_ns")],
         "rulesets": summary["rulesets"],
@@ -65,19 +65,22 @@ def main(argv=None):
     parser.add_argument("--files", nargs="+", default=["egglog/tests/calc.egg"])
     parser.add_argument("--treatments", nargs="+", choices=["off", "proofs", "proof-testing"],
                         default=["off", "proof-testing"])
+    parser.add_argument("--samples", type=int, default=3, help="repetitions per configuration")
     tokens = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(tokens)
+    if args.samples < 1:
+        parser.error("--samples must be positive")
     binary = args.binary.expanduser().resolve()
     reg = eval_live.Registry(selection_arguments=["files", "treatments", "repository", "binary"],
                              browser_source=Path(__file__), title="Egglog evaluation")
     for file in args.files:
-        reg.benchmark(file, measure, version="1", build=prebuilt, build_config={"binary": str(binary)},
-                      inputs=[file, binary], environment={"RUST_LOG": "error"})
-    requests = [eval_live.RunRequest(file, repository=str(args.repository), commit=args.commit,
-                                    config={"file": file, "treatment": treatment}, samples=args.samples)
-                for file in args.files for treatment in args.treatments]
-    reg.table("Egglog timings", timings, requires={"runs": requests}, id="timings")
-    reg.macros("Paper numbers", numbers, requires={"runs": requests}, id="numbers")
+        reg.benchmark(file, measure, version="2", build=prebuilt, build_config={"binary": str(binary)},
+                      inputs=[file, binary], environment={"RUST_LOG": "error"}, repository=args.repository,
+                      treatments=[{"file": file, "treatment": treatment, "sample": sample}
+                                  for treatment in args.treatments for sample in range(args.samples)])
+    # No selectors: both outputs require the entire declared treatment catalog.
+    reg.table("Egglog timings", timings, id="timings")
+    reg.macros("Paper numbers", numbers, id="numbers")
     try:
         result = reg.run(args=args, argv=tokens)
     except (ValueError, RuntimeError) as error:

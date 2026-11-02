@@ -24,10 +24,12 @@ Table                   Contents
 ``eval_environments``   Environment ID and named platform/Python/tool settings.
 ``eval_runs``           Attempt ID, collecting invocation, benchmark, resolved
                         commit/ref, cache identity, configuration/environment,
-                        sample index, status, timing, binary hash, and error.
+                        data version, status, timing, binary hash, and error.
 ``eval_inputs``         Run ID, declared input path and SHA-256.
 ``eval_selections``     Rendering invocation, artifact, named requirement,
                         position, and selected run ID (fresh or reused).
+``eval_requirements``   Rendering invocation, artifact, and requirement name,
+                        including requirements with no selected observations.
 ``eval_processes``      Process ID, run, cwd, duration, status, exit code, logs.
 ``eval_commands``       Process/run ID and ordered command argument values.
 User tables             Scalar measurement rows with library-supplied run ID.
@@ -41,10 +43,25 @@ to strings. A configuration's three scopes are ``request``, ``arguments``, and
 ``build``. No scope is hidden in a JSON-valued cell.
 
 An observation's collecting invocation and a figure's rendering invocation may
-be different: ``eval_selections`` records the exact reusable samples used.
-Force runs retain previous attempts and selections. Failed/timed-out samples
-never count toward successful sample requirements. A run left in ``running``
+be different: ``eval_selections`` records the exact reusable observations used.
+Force runs retain previous attempts and selections. Failed/timed-out attempts
+never satisfy a treatment's data requirement. A run left in ``running``
 state by a stopped process becomes ``interrupted`` when the next writer starts.
+
+The full treatment and CLI measurement parameters form the configuration key.
+Repetitions are user-defined fields such as ``sample``; a CLI sample count is
+also part of the configuration by default. There is no library sample counter.
+Each attempt has a ``run_id`` linking its table rows to configuration and
+commit provenance. Additional row keys such as phase belong to the paper's
+table definitions; derived outputs can group rows and compute statistics.
+
+``eval_runs.data_version`` records the collecting benchmark's declared
+``version``. The version participates in the runner fingerprint: changing it
+produces a new cache identity without deleting earlier data. It describes the
+tables' format/meaning, independently of this JSON container schema version.
+Earlier schema-1 observations may lack this field and retain their historical
+``sample`` attempt index. They are not relabeled. The loader reconstructs
+``eval_requirements`` from earlier nonempty selections when that table is absent.
 
 ``eval_runs.timeout`` is the per-command deadline used for that attempt. It
 does not participate in cache identity: raising the deadline preserves successes

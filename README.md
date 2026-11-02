@@ -25,13 +25,21 @@ callbacks and call `reg.run()` to collect, cache, and render:
 
 ```python
 reg = eval_live.Registry()
-reg.benchmark("worker", collect, version="1", inputs=["worker.py"])
-runs = eval_live.RunRequest("worker", samples=3)
-reg.graph("Runtime", runtime, requires=runs)
-reg.table("Summary", summary, requires=runs)
-reg.macros("Paper numbers", numbers, requires=runs)
+reg.benchmark("worker", collect, version="1", inputs=["worker.py"],
+              treatments=[{"suite": suite, "size": size}
+                          for suite in suites for size in sizes])
+reg.graph("Runtime", runtime,
+          requires=lambda ts: [t for t in ts if t["suite"] in {"a", "b"}])
+reg.table("Summary", summary)  # no selector: all declared treatments
+reg.macros("Paper numbers", numbers)
 reg.run(args=args, argv=tokens)
 ```
+
+Selectors are ordinary Python functions. Their results are combined and
+deduplicated before collection. Repetitions are ordinary treatment fields
+such as `sample`; callbacks compute averages or other statistics. CLI
+measurement parameters—including a script's total sample count—and the
+declared data `version` participate in cache identity and are saved with results.
 
 Existing methods for rendering supplied data still work. See the [Python guide](docs/python-guide.rst),
 [data format](docs/data-format.rst), and [original design plan](docs/refactor-plan.rst).
@@ -50,7 +58,7 @@ Open `demo/out/paper/index.html` for the interactive report. Its Python graphs a
 computed tables load Pyodide and matplotlib from a CDN; raw tables work without
 that runtime. The demo writes all data to `demo/out/paper/results.json` and
 paper artifacts alongside it. Run it again to reuse cached observations;
-`--samples 5` fills missing samples, `--only summary` selects a subset, and
+`--samples 5` changes the demo's configuration, `--only summary` selects a subset, and
 `--dry-run` explains required work without running it. `--render-only` regenerates
 outputs from saved sample selections without the benchmark repository.
 `--timeout 60` sets a per-command deadline in seconds. Increasing it reuses

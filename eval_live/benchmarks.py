@@ -101,7 +101,9 @@ def callable_identity(function: Callable) -> str:
 class Benchmark:
     """Collect one observation with ``run(context) -> named flat tables``.
 
-    ``version`` is an explicit measurement protocol version. Declare helper
+    ``version`` is the explicit data format/measurement protocol version,
+    stored as ``eval_runs.data_version`` and included in cache identity. Bump
+    it when the returned tables change shape or meaning. Declare helper
     functions in ``dependencies`` and input paths in ``inputs`` so changes
     invalidate the cache. Relative input paths refer to the benchmarked commit;
     absolute paths refer to external files. ``environment`` records execution
@@ -128,7 +130,8 @@ class Benchmark:
     timeout: float = 300
 
     def __post_init__(self):
-        if (not self.name or not self.version or type(self.timeout) not in (int, float)
+        if (not isinstance(self.name, str) or not self.name or not isinstance(self.version, str)
+                or not self.version or type(self.timeout) not in (int, float)
                 or not math.isfinite(self.timeout) or self.timeout <= 0):
             raise ValueError("benchmark name/version and a positive timeout are required")
         parameters(self.build_config)
@@ -157,7 +160,6 @@ class RunContext:
 
     directory: Path
     config: Mapping
-    sample: int
     commit: str
     timeout: float
     environment: Mapping[str, str]

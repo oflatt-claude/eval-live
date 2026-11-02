@@ -23,8 +23,8 @@ across the artifact declarations.
 | `macros.tex` | `\EvalSamples`, `\EvalInputSizes`, and `\EvalBestMedianMs` |
 | `index.html` | Interactive raw data, computed outputs, and graphs |
 
-Run it again to reuse all observations. Increase sample counts to fill only
-what is missing, select outputs, or change measurement parameters:
+Run it again to reuse all observations. Select outputs or change measurement
+parameters with CLI arguments:
 
 ```bash
 python demo/eval.py
@@ -44,6 +44,14 @@ use `--invocation ID` to choose a complete run. No benchmark repository is
 needed for render-only use. Use `--data PATH` to share a cache across artifact
 output directories. Every option and its default is recorded, even options
 that do not affect measurement identity.
+
+The demo defines `--samples` itself and includes a `sample` index in each
+treatment. Both the total CLI count and the individual index affect cache
+identity. Changing the count collects fresh results for that configuration;
+repeating it reuses them. Median calculation is ordinary Python in the table
+callback. `requires` functions select from the declared cross product; they
+skip unused baseline/list combinations. An output without a selector would
+request the whole catalog.
 
 `--timeout` overrides the benchmark's per-command deadline in seconds. If a
 command times out, raise the limit and run again: completed samples are reused

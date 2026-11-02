@@ -28,7 +28,6 @@ A table function receives the data dict and returns a list of row dicts.
 These are rendered as filterable HTML tables below the raw data tables::
 
     def mean_timing(data):
-        import math
         result = []
         for row in data["timings"]:
             times = row["timing_list"]
@@ -73,50 +72,13 @@ from __future__ import annotations
 
 import io
 import base64
-from dataclasses import dataclass, field
-import math
+from dataclasses import dataclass
 import re
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Callable, Mapping
 
 # The user script sets this module-level variable.
 registry = None
-
-
-@dataclass(frozen=True)
-class RunRequest:
-    """Data required from one benchmark, commit, and configuration.
-
-    ``repository`` is a local Git repository; ``commit`` is a ref or full SHA.
-    Use ``WORKTREE`` explicitly to execute current working files. Dirty
-    worktrees require ``--allow-dirty`` and never reuse persisted observations.
-    ``config`` contains scalar or scalar-list parameters. ``samples`` is the
-    minimum observation count and does not affect an observation's cache key.
-    """
-
-    benchmark: str
-    config: Mapping[str, Any] = field(default_factory=dict)
-    repository: str = "."
-    commit: str = "HEAD"
-    samples: int = 1
-
-    def __post_init__(self):
-        if type(self.samples) is not int or self.samples < 1:
-            raise ValueError("samples must be a positive integer")
-        if not self.benchmark or not self.commit:
-            raise ValueError("benchmark and commit must be nonempty")
-        frozen = {}
-        for name, value in self.config.items():
-            if not isinstance(name, str):
-                raise ValueError("configuration names must be strings")
-            values = value if isinstance(value, (list, tuple)) else [value]
-            for item in values:
-                if item is not None and type(item) not in (str, int, bool, float):
-                    raise ValueError("configurations contain only scalars and scalar lists")
-                if type(item) is float and not math.isfinite(item):
-                    raise ValueError("configuration numbers must be finite")
-            frozen[name] = tuple(values) if isinstance(value, (list, tuple)) else value
-        object.__setattr__(self, "config", MappingProxyType(frozen))
 
 
 @dataclass(frozen=True)
@@ -133,19 +95,16 @@ class _Output:
 
 
 def _requirements(requires):
-    if requires is None:
-        return {}
-    if not isinstance(requires, Mapping):
+    if requires is None or requires == {}:
+        return {"data": None}
+    if callable(requires):
         requires = {"data": requires}
-    result = {}
-    for name, requests in requires.items():
-        if not isinstance(name, str) or not name:
-            raise ValueError("requirement names must be nonempty strings")
-        requests = (requests,) if isinstance(requests, RunRequest) else tuple(requests)
-        if not requests or any(not isinstance(request, RunRequest) for request in requests):
-            raise ValueError("each requirement must contain at least one RunRequest")
-        result[name] = requests
-    return MappingProxyType(result)
+    if not isinstance(requires, Mapping):
+        raise ValueError("requires must be a treatment selector or named selectors")
+    if any(not isinstance(name, str) or not name or not callable(selector)
+           for name, selector in requires.items()):
+        raise ValueError("each named requirement must be a treatment selector")
+    return MappingProxyType(dict(requires))
 
 
 def _select_rows(data, ids):
@@ -157,6 +116,7 @@ def _select_rows(data, ids):
     configs = {row["config_id"] for row in result.get("eval_runs", [])}
     result["eval_configs"] = [dict(row) for row in data.get("eval_configs", [])
                               if row["config_id"] in configs]
+    result["eval_requirements"] = [dict(row) for row in data.get("eval_requirements", [])]
     return result
 
 
@@ -164,6 +124,7 @@ def _scoped_data(data, selections):
     result = _select_rows(data, {run_id for ids in selections.values() for run_id in ids})
     # A callback sees only this output's named selections, even when the same
     # observation has different roles in other outputs or earlier invocations.
+    result["eval_requirements"] = [{"requirement": name} for name in selections]
     result["eval_selections"] = [{"requirement": name, "run_id": run_id}
                                 for name, ids in selections.items() for run_id in ids]
     return result
@@ -178,7 +139,8 @@ def select(data: dict, requirement: str) -> dict:
     and selection still works after interactive filters remove all measurements.
     """
     rows = data.get("eval_selections", [])
-    if requirement not in {row["requirement"] for row in rows}:
+    names = {row["requirement"] for row in data.get("eval_requirements", []) + rows}
+    if requirement not in names:
         raise ValueError(f"unknown requirement: {requirement!r}")
     return _select_rows(data, {row["run_id"] for row in rows if row["requirement"] == requirement})
 
@@ -204,10 +166,17 @@ class Registry:
         self.browser_source = browser_source
         self.title = title
 
-    def benchmark(self, name, fn, *, version, **options):
+    def benchmark(self, name, fn, *, version, treatments=None, repository=".", commit=None, **options):
         """Register ``fn(context) -> named flat tables`` for one observation.
 
-        ``version`` identifies the measurement protocol. Options are the
+        ``treatments`` is an iterable of configuration dictionaries (default:
+        one empty configuration). Selectors see all registered treatments,
+        with ``benchmark``, ``repository``, and ``commit`` fields added. A
+        treatment can override repository/commit; otherwise use the registered
+        values and the CLI's ``--commit`` (default HEAD).
+
+        ``version`` identifies the data format/measurement protocol, is saved
+        on each observation, and participates in cache identity. Options are the
         fields of :class:`Benchmark`: ``inputs``, ``dependencies``, ``build``,
         ``build_config``, ``environment``, ``tools``, and ``timeout`` (seconds
         per command, default 300). Registration only records the callback;
@@ -215,7 +184,11 @@ class Registry:
         """
         if name in self._benchmarks:
             raise ValueError(f"duplicate benchmark: {name!r}")
-        self._benchmarks[name] = dict(name=name, run=fn, version=version, **options)
+        self._benchmarks[name] = {
+            "benchmark": dict(name=name, run=fn, version=version, **options),
+            "treatments": tuple(dict(row) for row in ([{}] if treatments is None else treatments)),
+            "repository": str(repository), "commit": commit,
+        }
 
     def _add(self, kind, name, fn, requires, id, caption=None, filter_source=None):
         if not callable(fn):
@@ -228,8 +201,10 @@ class Registry:
     def graph(self, name, fn, *, requires=None, id=None):
         """Register ``fn(data) -> matplotlib.figure.Figure``.
 
-        ``name`` is the display title. ``requires`` may be one ``RunRequest``,
-        a list of requests, or a mapping of named requirements for comparisons.
+        ``name`` is the display title. ``requires(treatments)`` returns the
+        treatments needed by this output. Omit it to select the whole catalog.
+        A mapping of named selector functions supports comparisons. Selectors
+        receive read-only dictionaries and must return members of the catalog.
         ``run`` passes only this output's selected observations to the callback.
         ``id`` defaults to a slug of the name and controls filenames and
         ``--only`` selection. Direct ``run_graphs(data)`` uses the supplied data.
@@ -258,7 +233,7 @@ class Registry:
         self._add("macros", name, fn, requires, id)
 
     def plan(self, *, args=None):
-        """Inspect selected outputs, cached samples, and missing work without writes."""
+        """Inspect selected outputs, cached observations, and missing work without writes."""
         from .planning import _Runner
         return _Runner(self).plan(args=args)
 

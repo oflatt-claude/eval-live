@@ -21,12 +21,12 @@ BUILDS = []
 
 
 def collect(context):
-    CALLS.append((context.commit, dict(context.config), context.sample))
+    CALLS.append((context.commit, {k: v for k, v in context.config.items() if k != "sample"}, context.config.get("sample", 0)))
     if context.config.get("fail"):
         context.command([sys.executable, "-c", "import sys; print('diagnostic'); sys.exit(7)"])
     value = int((context.directory / "value.txt").read_text())
     return {"measurements": [{"value": value, "factor": context.config.get("factor", 1),
-                               "sample": context.sample}]}
+                               "sample": context.config.get("sample", 0)}]}
 
 
 def slow(context):
@@ -35,10 +35,10 @@ def slow(context):
 
 
 def timed_collect(context):
-    CALLS.append((context.commit, dict(context.config), context.sample))
-    if context.config.get("delayed") or (context.config.get("after_first") and context.sample > 0):
+    CALLS.append((context.commit, {k: v for k, v in context.config.items() if k != "sample"}, context.config.get("sample", 0)))
+    if context.config.get("delayed") or (context.config.get("after_first") and context.config.get("sample", 0) > 0):
         context.command([sys.executable, "-c", "import time; time.sleep(0.1)"])
-    return {"measurements": [{"value": 20, "sample": context.sample}]}
+    return {"measurements": [{"value": 20, "sample": context.config.get("sample", 0)}]}
 
 
 def build(context):
@@ -88,6 +88,10 @@ def constant_table(data):
     return [{"message": "No benchmark required"}]
 
 
+def empty_named_table(data):
+    return [{"count": len(eval_live.select(data, "empty").get("measurements", []))}]
+
+
 class EvaluationTests(unittest.TestCase):
     def setUp(self):
         CALLS.clear()
@@ -104,6 +108,7 @@ class EvaluationTests(unittest.TestCase):
         self.head = self.git("rev-parse", "HEAD")
         self.output = self.root / "output"
         self.data = self.output / "results.json"
+        self.treatments = []
 
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.repo), *args], stderr=subprocess.DEVNULL, text=True).strip()
@@ -114,7 +119,14 @@ class EvaluationTests(unittest.TestCase):
         self.git("-c", "user.name=Tests", "-c", "user.email=tests@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", str(value))
 
     def request(self, *, samples=1, commit="HEAD", **config):
-        return eval_live.RunRequest("read", repository=str(self.repo), commit=commit, config=config, samples=samples)
+        # Repetitions belong to the paper: each sample is an ordinary treatment.
+        self.treatments.extend({**config, "sample": i, "commit": commit} for i in range(samples))
+
+        def needed(treatments):
+            return [t for t in treatments if t["commit"] == commit and t["sample"] < samples
+                    and {k: v for k, v in t.items() if k not in ("benchmark", "repository", "commit", "sample")} == config]
+
+        return needed
 
     def evaluation(self, request=None, registry=None, benchmark=None, **kwargs):
         if registry is None:
@@ -122,7 +134,7 @@ class EvaluationTests(unittest.TestCase):
             registry.table("values", table, requires=request or self.request())
         options = vars(benchmark or eval_live.Benchmark("read", collect, "1", inputs=["value.txt"])).copy()
         options["fn"] = options.pop("run")
-        registry.benchmark(**options)
+        registry.benchmark(**options, treatments=self.treatments, repository=self.repo)
         return registry
 
     def run_eval(self, evaluation=None, *, render=False, **options):
@@ -146,11 +158,85 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(self.stored()["eval_invocations"]), 2)
         self.assertEqual(self.stored()["eval_argv"][0]["token"], "--test")
 
-    def test_increased_samples_and_shared_requirements(self):
+    def test_sample_count_cli_argument_is_part_of_configuration_identity(self):
+        two = self.evaluation(self.request(samples=2))
+        self.assertEqual(self.run_eval(two, samples=2).collected, 2)
+        self.assertEqual(self.run_eval(two, samples=2).reused, 2)
+        three = self.evaluation(self.request(samples=3))
+        result = self.run_eval(three, samples=3)
+        self.assertEqual((result.collected, result.reused), (3, 0))
+        self.assertEqual(self.run_eval(two, samples=2).reused, 2)
+        self.assertEqual(len(self.stored()["eval_runs"]), 5)
+
+    def test_no_selector_runs_entire_catalog_and_duplicates_share_work(self):
+        reg = eval_live.Registry()
+        reg.benchmark("read", collect, version="1", repository=self.repo,
+                      treatments=[{"suite": "a"}, {"suite": "b"}, {"suite": "a"}])
+        reg.table("All", table)
+        reg.macros("Numbers", macros)
+        result = self.run_eval(reg)
+        self.assertEqual(result.collected, 2)
+        self.assertEqual(len(self.stored()["eval_selections"]), 4)
+        self.assertEqual(self.run_eval(reg).reused, 2)
+
+    def test_python_selectors_filter_catalog_before_resolving_targets(self):
+        reg = eval_live.Registry()
+        reg.benchmark("read", collect, version="1", repository=self.repo, treatments=[
+            {"suite": suite, "size": size, "commit": "missing-ref" if suite == "c" else "HEAD"}
+            for suite in ("a", "b", "c") for size in (10, 20)
+        ])
+
+        def needed(treatments):
+            return (dict(t) for t in treatments if t["suite"] in {"a", "b"})
+
+        def unselected(treatments):
+            raise AssertionError("unselected output must not evaluate its selector")
+
+        reg.table("Selected", table, requires=needed)
+        reg.table("Other", table, requires=unselected)
+        result = self.run_eval(reg, only=["selected"])
+        self.assertEqual(result.collected, 4)
+        self.assertEqual({config["size"] for _, config, _ in CALLS}, {10, 20})
+        self.assertEqual({config["suite"] for _, config, _ in CALLS}, {"a", "b"})
+
+    def test_selectors_cannot_mutate_or_invent_treatments(self):
+        def mutate(treatments):
+            treatments[0]["size"] = 99
+            return treatments
+
+        selectors = [mutate, lambda ts: [{**ts[0], "size": 99}], lambda ts: None]
+        for selector in selectors:
+            reg = eval_live.Registry()
+            reg.benchmark("read", collect, version="1", repository=self.repo, treatments=[{"size": 10}])
+            reg.table("Invalid", table, requires=selector)
+            with self.assertRaisesRegex(ValueError, "invalid treatment selection for invalid/data"):
+                reg.plan(args={"output": self.output})
+        self.assertFalse(self.output.exists())
+        self.assertEqual(CALLS, [])
+
+    def test_empty_named_selection_replays_without_evaluating_selector(self):
+        reg = eval_live.Registry()
+        reg.benchmark("read", collect, version="1", repository=self.repo)
+        reg.table("Empty", empty_named_table, requires={"empty": lambda ts: []})
+        result = self.run_eval(reg, render=True)
+        self.assertEqual(result.collected, 0)
+        self.repo.rename(self.root / "moved")
+
+        def unavailable(treatments):
+            raise AssertionError("replay must not evaluate selectors")
+
+        replay = eval_live.Registry()
+        replay.table("Empty", empty_named_table, requires={"empty": unavailable})
+        self.run_eval(replay, render=True, render_only=True)
+        self.assertEqual(self.stored()["eval_runs"], [])
+        self.assertEqual(len(self.stored()["eval_requirements"]), 2)
+
+    def test_explicit_sample_treatments_and_shared_requirements(self):
         request = self.request(samples=2)
         reg = eval_live.Registry()
         reg.table("first", table, requires=request)
-        reg.table("second", table, requires=[request, self.request(samples=3)])
+        more = self.request(samples=3)
+        reg.table("second", table, requires=lambda ts: [*request(ts), *more(ts)])
         result = self.run_eval(self.evaluation(registry=reg))
         self.assertEqual(result.collected, 3)
         selected = self.stored()["eval_selections"]
@@ -174,15 +260,16 @@ class EvaluationTests(unittest.TestCase):
     def test_configuration_inputs_and_unknown_arguments_invalidate(self):
         self.run_eval()
         self.run_eval(self.evaluation(self.request(factor=2)))
-        self.run_eval(temperature=3)
-        self.assertEqual(len(CALLS), 3)
+        for argument in ("temperature", "baseline"):
+            self.run_eval(**{argument: 3})
+        self.assertEqual(len(CALLS), 4)
         external = self.root / "input.txt"
         external.write_text("first")
         benchmark = eval_live.Benchmark("read", collect, "1", inputs=[external])
         self.run_eval(self.evaluation(benchmark=benchmark))
         external.write_text("second")
         self.run_eval(self.evaluation(benchmark=benchmark))
-        self.assertEqual(len(CALLS), 5)
+        self.assertEqual(len(CALLS), 6)
         result = self.run_eval(self.evaluation(benchmark=benchmark), only=["values"])
         self.assertEqual(result.collected, 0)
 
@@ -233,7 +320,7 @@ class EvaluationTests(unittest.TestCase):
             self.run_eval(self.evaluation(registry=reg))
         self.assertEqual(caught.exception.result.collected, 1)
         data = self.stored()
-        self.assertEqual([row["status"] for row in data["eval_runs"]], ["failure", "success"])
+        self.assertEqual([row["status"] for row in data["eval_runs"]], ["failure", "failure", "failure", "success"])
         self.assertEqual(data["eval_processes"][0]["returncode"], 7)
         self.assertIn("diagnostic", data["eval_processes"][0]["stdout"])
         self.assertEqual({row["artifact_id"] for row in data["eval_selections"]}, {"working"})
@@ -291,14 +378,14 @@ class EvaluationTests(unittest.TestCase):
             self.run_eval(evaluation, timeout=0.01, force=True)
         self.assertEqual(len(CALLS), 2)
 
-    def test_timeout_retry_collects_only_the_remaining_sample_deficit(self):
+    def test_timeout_retry_collects_only_failed_treatments(self):
         evaluation = self.evaluation(self.request(after_first=True, samples=3),
                                      benchmark=eval_live.Benchmark("read", timed_collect, "1"))
         with self.assertRaises(eval_live.CollectionError):
             self.run_eval(evaluation, timeout=0.01)
         result = self.run_eval(evaluation, timeout=5)
         self.assertEqual((result.reused, result.collected), (1, 2))
-        self.assertEqual([sample for _, _, sample in CALLS], [0, 1, 2, 3])
+        self.assertEqual([sample for _, _, sample in CALLS], [0, 1, 2, 1, 2])
         self.assertEqual(len(self.stored()["eval_selections"]), 3)
 
     def test_raising_timeout_can_reuse_older_successes_without_retrying(self):
@@ -309,7 +396,7 @@ class EvaluationTests(unittest.TestCase):
             self.run_eval(evaluation, timeout=0.01, force=True)
         result = self.run_eval(evaluation, timeout=5)
         self.assertEqual((result.reused, result.collected), (2, 0))
-        self.assertEqual(len(CALLS), 3)
+        self.assertEqual(len(CALLS), 4)
         data = self.stored()
         def selected(invocation):
             return [row["run_id"] for row in data["eval_selections"] if row["invocation_id"] == invocation]
@@ -331,6 +418,9 @@ class EvaluationTests(unittest.TestCase):
         self.run_eval()
         data = self.stored()
         row = data["eval_runs"][0]
+        data.pop("eval_requirements")
+        row.pop("data_version")
+        row["sample"] = 0  # Earlier writers recorded their internal attempt index.
         row["cache_key"] = digest({
             "repository": row["repository"], "commit": row["commit"], "dirty": row["dirty"],
             "benchmark": row["benchmark"], "runner": row["runner_id"], "config": row["config_id"],
@@ -343,7 +433,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(self.stored()["eval_runs"][0], row)
         result = self.run_eval(self.evaluation(self.request(samples=2)), timeout=600)
         self.assertEqual((result.reused, result.collected), (1, 1))
-        self.assertEqual([run["sample"] for run in self.stored()["eval_runs"]], [0, 1])
+        self.assertEqual([row["sample"] for row in self.stored()["measurements"]], [0, 1])
 
     def test_timeout_cli_and_programmatic_validation(self):
         parser = eval_live.add_arguments(argparse.ArgumentParser())
@@ -368,7 +458,7 @@ class EvaluationTests(unittest.TestCase):
         benchmark = eval_live.Benchmark("read", use_binary, "1", build=build, inputs=["value.txt"])
         requests = [self.request(value=1, samples=2), self.request(value=2)]
         reg = eval_live.Registry()
-        reg.table("values", table, requires=requests)
+        reg.table("values", table, requires=lambda ts: [t for select in requests for t in select(ts)])
         evaluation = self.evaluation(registry=reg, benchmark=benchmark)
         result = self.run_eval(evaluation)
         self.assertEqual(result.collected, 3)
@@ -426,6 +516,7 @@ class EvaluationTests(unittest.TestCase):
         self.run_eval()
         result = self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", collect, "2", inputs=["value.txt"])))
         self.assertEqual(result.collected, 1)
+        self.assertEqual([row["data_version"] for row in self.stored()["eval_runs"]], ["1", "2"])
         result = self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", collect, "2", inputs=["value.txt"], dependencies=[table])))
         self.assertEqual(result.collected, 1)
 
@@ -456,7 +547,7 @@ class EvaluationTests(unittest.TestCase):
             reg.benchmark("read", collect, version="1")
         with self.assertRaisesRegex(ValueError, "filename-safe"):
             reg.table("invalid", table, id="../escape")
-        with self.assertRaisesRegex(ValueError, "RunRequest"):
+        with self.assertRaisesRegex(ValueError, "selector"):
             reg.table("invalid", table, requires={"empty": []})
         reg.table("Values!", table, requires=self.request())
         with self.assertRaisesRegex(ValueError, "IDs.*unique"):
@@ -480,13 +571,14 @@ class RegistryTests(unittest.TestCase):
             exec(eval_live.pyodide_lib(), module.__dict__)
             reg = module.Registry()
             reg.benchmark("worker", collect, version="1")
-            reg.table("Values", table, requires=module.RunRequest("worker"))
+            reg.table("Values", table, requires=lambda treatments: treatments)
             self.assertEqual(reg.run_tables({"measurements": [{"value": 7}]})[0]["rows"],
                              [{"value": 7, "sample": 0}])
 
     def test_original_callbacks_and_filters_work_with_requirements_registered(self):
         reg = eval_live.Registry()
-        request = eval_live.RunRequest("never-collected")
+        def request(treatments):
+            return treatments
         data = {"measurements": [{"value": 1}, {"value": 2}, {"value": 3}]}
 
         def keep(rows, data):

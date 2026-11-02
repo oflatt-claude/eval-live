@@ -11,6 +11,7 @@ from pathlib import Path
 import platform
 import sys
 import time
+from types import MappingProxyType
 from typing import Mapping, Sequence
 import uuid
 
@@ -28,7 +29,7 @@ def now() -> str:
 
 @dataclass
 class PlannedRun:
-    """One deduplicated execution request and its reusable observations."""
+    """One deduplicated treatment and its applicable cached attempt."""
 
     key: str
     benchmark: Benchmark
@@ -40,24 +41,23 @@ class PlannedRun:
     config_id: str
     environment_id: str
     runner_id: str
-    samples: int
-    selected: list[dict] = field(default_factory=list)
+    selected: dict | None = None
     needed_by: list[str] = field(default_factory=list)
     blocked: dict | None = None
 
     @property
     def missing(self) -> int:
         """Number of additional observations eligible for collection."""
-        return 0 if self.blocked else max(0, self.samples - len(self.selected))
+        return int(self.selected is None and self.blocked is None)
 
 
 @dataclass
 class Plan:
-    """Selected artifacts, shared run requests, and their named dependencies."""
+    """Selected outputs, shared treatment runs, and their named dependencies."""
 
     artifacts: list[_Output]
     runs: dict[str, PlannedRun]
-    requirements: dict[str, dict[str, list[tuple[str, int]]]]
+    requirements: dict[str, dict[str, list[str]]]
 
     @property
     def missing(self) -> int:
@@ -65,18 +65,18 @@ class Plan:
 
     @property
     def reused(self) -> int:
-        return sum(len(run.selected) for run in self.runs.values())
+        return sum(run.selected is not None for run in self.runs.values())
 
     def describe(self) -> str:
         """Explain required runs, cache hits, and the artifacts needing them."""
-        lines = [f"{len(self.artifacts)} artifacts; {self.reused} cached samples; {self.missing} missing samples"]
+        lines = [f"{len(self.artifacts)} artifacts; {self.reused} cached treatments; {self.missing} missing treatments"]
         for run in self.runs.values():
             blocked = ""
             if run.blocked:
                 remedy = "increase --timeout or use --force" if run.blocked["status"] == "timed-out" else "use --force"
                 blocked = f"; blocked by cached {run.blocked['status']} ({remedy})"
             lines.append(f"  {run.benchmark.name}@{run.target.commit[:12]} {run.config!r}: "
-                         f"{len(run.selected)} cached, {run.missing} missing; timeout {run.benchmark.timeout:g}s; "
+                         f"{int(run.selected is not None)} cached, {run.missing} missing; timeout {run.benchmark.timeout:g}s; "
                          f"needed by {', '.join(run.needed_by)}{blocked}")
         return "\n".join(lines)
 
@@ -106,7 +106,8 @@ class _Runner:
     """Local collection engine for a Registry; never imported in the browser."""
 
     def __init__(self, registry: Registry):
-        self.benchmarks = {name: Benchmark(**options) for name, options in registry._benchmarks.items()}
+        self.declarations = registry._benchmarks
+        self.benchmarks = {name: Benchmark(**spec["benchmark"]) for name, spec in self.declarations.items()}
         self.artifacts = registry._outputs
         if not self.artifacts:
             raise ValueError("register at least one graph, table, or macros output")
@@ -122,7 +123,8 @@ class _Runner:
     def _options(args: Namespace | Mapping | None) -> dict:
         supplied = vars(args) if isinstance(args, Namespace) else dict(args or {})
         options = dict(output="out", data=None, only=None, benchmarks=None, force=False,
-                       dry_run=False, render_only=False, invocation=None, allow_dirty=False, timeout=None)
+                       dry_run=False, render_only=False, invocation=None, allow_dirty=False, timeout=None,
+                       commit="HEAD")
         options.update(parameters(supplied))
         timeout = options["timeout"]
         if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
@@ -157,6 +159,36 @@ class _Runner:
         options = self._options(args)
         return self._plan(options, Store(self._data_path(options)))
 
+    def _catalog(self, options: dict) -> dict[str, Mapping]:
+        catalog = {}
+        for name, spec in self.declarations.items():
+            for raw in spec["treatments"]:
+                config = parameters(raw)
+                if "benchmark" in config:
+                    raise ValueError("benchmark is a reserved treatment field")
+                treatment = {"benchmark": name, "repository": spec["repository"],
+                             "commit": spec["commit"] or options["commit"], **config}
+                if any(not isinstance(treatment[key], str) or not treatment[key] for key in ("repository", "commit")):
+                    raise ValueError("treatment repository and commit must be nonempty strings")
+                catalog[digest(treatment)] = MappingProxyType({
+                    key: tuple(value) if isinstance(value, list) else value for key, value in treatment.items()
+                })
+        return catalog
+
+    @staticmethod
+    def _choose(selector, catalog: dict, label: str) -> list[Mapping]:
+        selected = {}
+        try:
+            rows = tuple(catalog.values())
+            for row in rows if selector is None else selector(rows):
+                key = digest(parameters(row))
+                if key not in catalog:
+                    raise ValueError("selector returned a treatment outside the declared catalog")
+                selected[key] = catalog[key]
+        except Exception as error:
+            raise ValueError(f"invalid treatment selection for {label}: {error}") from error
+        return list(selected.values())
+
     def _plan(self, options: dict, store: Store) -> Plan:
         artifacts = self._artifacts(options)
         measurement_args = {key: value for key, value in options.items()
@@ -165,22 +197,22 @@ class _Runner:
         if allowed is not None and (not isinstance(allowed, list) or set(allowed) - self.benchmarks.keys()):
             raise ValueError("--benchmarks contains unknown benchmark names")
         plan = Plan(artifacts, {}, {})
+        catalog = self._catalog(options)
         targets = {}
         for artifact in artifacts:
             plan.requirements[artifact.id] = {}
-            for name, requests in artifact.requires.items():
-                requirements = {}
-                for request in requests:
-                    if request.benchmark not in self.benchmarks:
-                        raise ValueError(f"unknown benchmark {request.benchmark!r} required by {artifact.id}")
-                    if allowed is not None and request.benchmark not in allowed:
-                        raise ValueError(f"benchmark subset excludes {request.benchmark!r}, required by {artifact.id}")
-                    benchmark = self.benchmarks[request.benchmark]
+            for name, selector in artifact.requires.items():
+                requirements = []
+                for treatment in self._choose(selector, catalog, f"{artifact.id}/{name}"):
+                    benchmark_name = treatment["benchmark"]
+                    if allowed is not None and benchmark_name not in allowed:
+                        raise ValueError(f"benchmark subset excludes {benchmark_name!r}, required by {artifact.id}")
+                    benchmark = self.benchmarks[benchmark_name]
                     if options["timeout"] is not None:
                         benchmark = replace(benchmark, timeout=options["timeout"])
-                    target_key = (str(request.repository), request.commit)
+                    target_key = (treatment["repository"], treatment["commit"])
                     if target_key not in targets:
-                        targets[target_key] = Target.resolve(request.repository, request.commit,
+                        targets[target_key] = Target.resolve(*target_key,
                                                              allow_dirty=options["allow_dirty"])
                     target = targets[target_key]
                     inputs = target.input_hashes(benchmark.inputs)
@@ -189,7 +221,8 @@ class _Runner:
                                    "executable": sys.executable,
                                    **{f"env.{key}": value for key, value in benchmark.environment.items()},
                                    **{f"tool.{key}": value for key, value in parameters(benchmark.tools).items()}}
-                    config = parameters(request.config)
+                    config = parameters({key: value for key, value in treatment.items()
+                                         if key not in ("benchmark", "repository", "commit")})
                     config_id = digest({"request": config, "arguments": measurement_args,
                                         "build": parameters(benchmark.build_config)})
                     runner_id = benchmark.identity()
@@ -201,18 +234,19 @@ class _Runner:
                     if key not in plan.runs:
                         plan.runs[key] = PlannedRun(key, benchmark, target, config, measurement_args,
                                                    environment, inputs, config_id, environment_id,
-                                                   runner_id, request.samples)
+                                                   runner_id)
                     run = plan.runs[key]
-                    run.samples = max(run.samples, request.samples)
                     reason = f"{artifact.id}/{name}"
                     if reason not in run.needed_by:
                         run.needed_by.append(reason)
                     if not target.dirty and not options["force"]:
-                        cached = store.cached(key, timeout=benchmark.timeout)[-run.samples:]
-                        run.selected = [row for row in cached if row["status"] == "success"]
-                        run.blocked = next((row for row in reversed(cached) if row["status"] != "success"), None)
-                    requirements[key] = max(requirements.get(key, 0), request.samples)
-                plan.requirements[artifact.id][name] = list(requirements.items())
+                        cached = store.cached(key, timeout=benchmark.timeout)
+                        latest = cached[-1] if cached else None
+                        run.selected = latest if latest and latest["status"] == "success" else None
+                        run.blocked = latest if latest and latest["status"] != "success" else None
+                    if key not in requirements:
+                        requirements.append(key)
+                plan.requirements[artifact.id][name] = requirements
         return plan
 
     def _invocation(self, store: Store, options: dict, argv: Sequence[str]) -> dict:
@@ -262,76 +296,72 @@ class _Runner:
                     continue
                 self._register_run_metadata(store, planned)
                 benchmark, target = planned.benchmark, planned.target
-                for _ in range(planned.missing):
-                    sample = max((r["sample"] for r in store.runs(planned.key)), default=-1) + 1
-                    row = dict(run_id=str(uuid.uuid4()), invocation_id=invocation["invocation_id"],
-                               cache_key=planned.key, cacheable=not target.dirty, benchmark=benchmark.name,
-                               repository=target.identity, requested_ref=target.ref, commit=target.commit,
-                               dirty=target.dirty, runner_id=planned.runner_id, config_id=planned.config_id,
-                               environment_id=planned.environment_id, sample=sample,
-                               timeout=benchmark.timeout, started_at=now(), finished_at=None,
-                               status="running", seconds=None, binary_sha256=None, error=None)
-                    store.data["eval_runs"].append(row)
-                    store.data["eval_inputs"].extend(dict(item, run_id=row["run_id"]) for item in planned.inputs)
+                row = dict(run_id=str(uuid.uuid4()), invocation_id=invocation["invocation_id"],
+                           cache_key=planned.key, cacheable=not target.dirty, benchmark=benchmark.name,
+                           repository=target.identity, requested_ref=target.ref, commit=target.commit,
+                           dirty=target.dirty, runner_id=planned.runner_id, data_version=benchmark.version, config_id=planned.config_id,
+                           environment_id=planned.environment_id,
+                           timeout=benchmark.timeout, started_at=now(), finished_at=None,
+                           status="running", seconds=None, binary_sha256=None, error=None)
+                store.data["eval_runs"].append(row)
+                store.data["eval_inputs"].extend(dict(item, run_id=row["run_id"]) for item in planned.inputs)
+                store.save()
+                contexts = []
+                started = time.perf_counter()
+                try:
+                    target_key = (target.identity, target.commit, target.working)
+                    if target_key not in directories:
+                        directories[target_key] = stack.enter_context(target.checkout())
+                    directory = directories[target_key]
+                    if target.input_hashes(benchmark.inputs) != planned.inputs:
+                        raise ValueError("declared inputs changed after planning")
+                    binary = None
+                    if benchmark.build:
+                        build_key = digest([*target_key, callable_identity(benchmark.build),
+                                            parameters(benchmark.build_config), planned.environment_id,
+                                            planned.runner_id, planned.inputs])
+                        if build_key not in binaries:
+                            build_context = RunContext(directory, parameters(benchmark.build_config),
+                                                       target.commit, benchmark.timeout, benchmark.environment)
+                            contexts.append(build_context)
+                            binary = Path(benchmark.build(build_context))
+                            binary = binary if binary.is_absolute() else directory / binary
+                            if not binary.is_file():
+                                raise ValueError("build callback did not produce a file")
+                            binaries[build_key] = binary
+                        binary = binaries[build_key]
+                        row["binary_sha256"] = file_digest(binary)
+                    context = RunContext(directory, planned.config, target.commit,
+                                         benchmark.timeout, benchmark.environment, binary)
+                    contexts.append(context)
+                    if target.materialized_input_hashes(directory, benchmark.inputs) != planned.inputs:
+                        raise ValueError("declared inputs changed while preparing the target")
+                    tables = benchmark.run(context)
+                    validate_tables(tables, user=True)
+                    if target.materialized_input_hashes(directory, benchmark.inputs) != planned.inputs:
+                        raise ValueError("declared inputs changed during collection")
+                    for name, rows in tables.items():
+                        store.data.setdefault(name, []).extend(dict(item, run_id=row["run_id"]) for item in rows)
+                    row["status"] = "success"
+                    planned.selected = row
+                    collected += 1
+                except KeyboardInterrupt:
+                    row.update(status="interrupted", error="interrupted by user")
+                    raise
+                except Exception as error:
+                    row.update(status=error.result.status if isinstance(error, ProcessError) else "failure", error=str(error))
+                    errors.append(f"{benchmark.name}@{target.commit[:12]}: {error}")
+                finally:
+                    row.update(finished_at=now(), seconds=time.perf_counter() - started)
+                    for context in contexts:
+                        for process in context.processes:
+                            process_id = str(uuid.uuid4())
+                            store.data["eval_processes"].append(dict(process_id=process_id, run_id=row["run_id"],
+                                cwd=process.cwd, seconds=process.seconds, returncode=process.returncode,
+                                stdout=process.stdout, stderr=process.stderr, status=process.status))
+                            store.data["eval_commands"].extend(dict(process_id=process_id, run_id=row["run_id"],
+                                position=i, value=value) for i, value in enumerate(process.argv))
                     store.save()
-                    contexts = []
-                    started = time.perf_counter()
-                    try:
-                        target_key = (target.identity, target.commit, target.working)
-                        if target_key not in directories:
-                            directories[target_key] = stack.enter_context(target.checkout())
-                        directory = directories[target_key]
-                        if target.input_hashes(benchmark.inputs) != planned.inputs:
-                            raise ValueError("declared inputs changed after planning")
-                        binary = None
-                        if benchmark.build:
-                            build_key = digest([*target_key, callable_identity(benchmark.build),
-                                                parameters(benchmark.build_config), planned.environment_id,
-                                                planned.runner_id, planned.inputs])
-                            if build_key not in binaries:
-                                build_context = RunContext(directory, parameters(benchmark.build_config), sample,
-                                                           target.commit, benchmark.timeout, benchmark.environment)
-                                contexts.append(build_context)
-                                binary = Path(benchmark.build(build_context))
-                                binary = binary if binary.is_absolute() else directory / binary
-                                if not binary.is_file():
-                                    raise ValueError("build callback did not produce a file")
-                                binaries[build_key] = binary
-                            binary = binaries[build_key]
-                            row["binary_sha256"] = file_digest(binary)
-                        context = RunContext(directory, planned.config, sample, target.commit,
-                                             benchmark.timeout, benchmark.environment, binary)
-                        contexts.append(context)
-                        if target.materialized_input_hashes(directory, benchmark.inputs) != planned.inputs:
-                            raise ValueError("declared inputs changed while preparing the target")
-                        tables = benchmark.run(context)
-                        validate_tables(tables, user=True)
-                        if target.materialized_input_hashes(directory, benchmark.inputs) != planned.inputs:
-                            raise ValueError("declared inputs changed during collection")
-                        for name, rows in tables.items():
-                            store.data.setdefault(name, []).extend(dict(item, run_id=row["run_id"]) for item in rows)
-                        row["status"] = "success"
-                        planned.selected.append(row)
-                        collected += 1
-                    except KeyboardInterrupt:
-                        row.update(status="interrupted", error="interrupted by user")
-                        raise
-                    except Exception as error:
-                        row.update(status=error.result.status if isinstance(error, ProcessError) else "failure", error=str(error))
-                        errors.append(f"{benchmark.name}@{target.commit[:12]}: {error}")
-                    finally:
-                        row.update(finished_at=now(), seconds=time.perf_counter() - started)
-                        for context in contexts:
-                            for process in context.processes:
-                                process_id = str(uuid.uuid4())
-                                store.data["eval_processes"].append(dict(process_id=process_id, run_id=row["run_id"],
-                                    cwd=process.cwd, seconds=process.seconds, returncode=process.returncode,
-                                    stdout=process.stdout, stderr=process.stderr, status=process.status))
-                                store.data["eval_commands"].extend(dict(process_id=process_id, run_id=row["run_id"],
-                                    position=i, value=value) for i, value in enumerate(process.argv))
-                        store.save()
-                    if row["status"] != "success":
-                        break
         return collected, errors
 
     @staticmethod
@@ -340,14 +370,16 @@ class _Runner:
         selections = {}
         for artifact in plan.artifacts:
             requirements = plan.requirements[artifact.id]
-            if any(plan.runs[key].blocked or len(plan.runs[key].selected) < count
-                   for requests in requirements.values() for key, count in requests):
+            if any(plan.runs[key].selected is None
+                   for keys in requirements.values() for key in keys):
                 continue
             ready.append(artifact)
             selections[artifact.id] = {}
-            for name, requests in requirements.items():
-                ids = list(dict.fromkeys(row["run_id"] for key, count in requests for row in plan.runs[key].selected[-count:]))
+            for name, keys in requirements.items():
+                ids = list(dict.fromkeys(plan.runs[key].selected["run_id"] for key in keys))
                 selections[artifact.id][name] = ids
+                store.data["eval_requirements"].append(dict(invocation_id=invocation_id,
+                    artifact_id=artifact.id, requirement=name))
                 store.data["eval_selections"].extend(dict(invocation_id=invocation_id,
                     artifact_id=artifact.id, requirement=name, position=i, run_id=run_id)
                     for i, run_id in enumerate(ids))
@@ -367,7 +399,9 @@ class _Runner:
         for artifact in artifacts:
             rows = [row for row in store.data["eval_selections"]
                     if row["invocation_id"] == saved and row["artifact_id"] == artifact.id]
-            if {row["requirement"] for row in rows} != set(artifact.requires):
+            names = {row["requirement"] for row in store.data["eval_requirements"]
+                     if row["invocation_id"] == saved and row["artifact_id"] == artifact.id}
+            if names != set(artifact.requires):
                 raise ValueError(f"saved invocation is missing requirements for {artifact.id}")
             selections[artifact.id] = {name: [row["run_id"] for row in sorted(rows, key=lambda r: r["position"])
                                             if row["requirement"] == name] for name in artifact.requires}
@@ -375,6 +409,8 @@ class _Runner:
         invocation["source_invocation"] = saved
         for artifact_id, scopes in selections.items():
             for name, ids in scopes.items():
+                store.data["eval_requirements"].append(dict(invocation_id=invocation["invocation_id"],
+                    artifact_id=artifact_id, requirement=name))
                 store.data["eval_selections"].extend(dict(invocation_id=invocation["invocation_id"],
                     artifact_id=artifact_id, requirement=name, position=i, run_id=run_id)
                     for i, run_id in enumerate(ids))
