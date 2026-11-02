@@ -166,7 +166,7 @@ class Registry:
         self.browser_source = browser_source
         self.title = title
 
-    def benchmark(self, name, fn, *, version, treatments=None, repository=".", commit=None, **options):
+    def benchmark(self, name, fn=None, *, version, treatments=None, repository=".", commit=None, **options):
         """Register ``fn(context) -> named flat tables`` for one observation.
 
         ``treatments`` is an iterable of configuration dictionaries (default:
@@ -175,13 +175,25 @@ class Registry:
         treatment can override repository/commit; otherwise use the registered
         values and the CLI's ``--commit`` (default HEAD).
 
+        Treatments run sequentially unless marked ``parallel=True``. Marked
+        treatments may use separate processes up to ``--jobs`` (CPU count by
+        default); unmarked treatments run alone. Parallel collectors must be
+        importable top-level functions. The flag and worker limit are saved
+        with the configuration and affect cache identity.
+
         ``version`` identifies the data format/measurement protocol, is saved
         on each observation, and participates in cache identity. Options are the
         fields of :class:`Benchmark`: ``inputs``, ``dependencies``, ``build``,
         ``build_config``, ``environment``, ``tools``, and ``timeout`` (seconds
         per command, default 300). Registration only records the callback;
         collection code is imported when planning or running locally.
+        Omit ``fn`` to use ``@reg.benchmark(name, version=..., ...)``.
         """
+        if fn is None:
+            return lambda callback: self.benchmark(name, callback, version=version, treatments=treatments,
+                                                   repository=repository, commit=commit, **options)
+        if not callable(fn):
+            raise ValueError("benchmark callback must be callable")
         if name in self._benchmarks:
             raise ValueError(f"duplicate benchmark: {name!r}")
         self._benchmarks[name] = {
@@ -189,16 +201,20 @@ class Registry:
             "treatments": tuple(dict(row) for row in ([{}] if treatments is None else treatments)),
             "repository": str(repository), "commit": commit,
         }
+        return fn
 
     def _add(self, kind, name, fn, requires, id, caption=None, filter_source=None):
+        if fn is None:
+            return lambda callback: self._add(kind, name, callback, requires, id, caption, filter_source)
         if not callable(fn):
             raise ValueError("output callback must be callable")
         output_id = id if id is not None else re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "graph"
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", output_id):
             raise ValueError("output IDs must be filename-safe letters, digits, underscores, or hyphens")
         self._outputs.append(_Output(kind, output_id, name, fn, _requirements(requires), caption, filter_source))
+        return fn
 
-    def graph(self, name, fn, *, requires=None, id=None):
+    def graph(self, name, fn=None, *, requires=None, id=None):
         """Register ``fn(data) -> matplotlib.figure.Figure``.
 
         ``name`` is the display title. ``requires(treatments)`` returns the
@@ -208,10 +224,12 @@ class Registry:
         ``run`` passes only this output's selected observations to the callback.
         ``id`` defaults to a slug of the name and controls filenames and
         ``--only`` selection. Direct ``run_graphs(data)`` uses the supplied data.
+        Use ``@reg.graph(name, ...)`` to register a function where it is defined.
+        Both forms return the original function, without wrapping it.
         """
-        self._add("graph", name, fn, requires, id)
+        return self._add("graph", name, fn, requires, id)
 
-    def table(self, name, fn, filter_source=None, *, caption=None, requires=None, id=None):
+    def table(self, name, fn=None, filter_source=None, *, caption=None, requires=None, id=None):
         """Register ``fn(data) -> list[dict]``; row keys are column headings.
 
         Cells can be scalars or styled ``{"text": ..., "style": ...}`` values.
@@ -220,17 +238,19 @@ class Registry:
         Filters are chained in registration order. ``caption`` is shown below
         the table in the terminal and browser. ``requires`` and ``id`` work as
         in :meth:`graph`; existing registrations need no changes.
+        ``@reg.table(name, ...)`` is the equivalent decorator form.
         """
-        self._add("table", name, fn, requires, id, caption, filter_source)
+        return self._add("table", name, fn, requires, id, caption, filter_source)
 
-    def macros(self, name, fn, *, requires=None, id=None):
+    def macros(self, name, fn=None, *, requires=None, id=None):
         """Register ``fn(data) -> {LaTeXMacroName: scalar_value}``.
 
         Macro names contain letters only; values are LaTeX-escaped. Local
         export writes a ``.tex`` file, and the browser/terminal shows the names
         and values as a table. ``requires`` and ``id`` work as in :meth:`graph`.
+        ``@reg.macros(name, ...)`` is the equivalent decorator form.
         """
-        self._add("macros", name, fn, requires, id)
+        return self._add("macros", name, fn, requires, id)
 
     def plan(self, *, args=None):
         """Inspect selected outputs, cached observations, and missing work without writes."""

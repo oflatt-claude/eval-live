@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import inspect
 import math
+import os
 from pathlib import Path
 import platform
 import sys
@@ -19,8 +20,9 @@ from .eval_live import Registry, _Output
 from .benchmarks import Benchmark, ProcessError, RunContext, callable_identity, file_digest
 from .cli import CONTROL_ARGUMENTS
 from .render import render_artifacts
-from .store import Store, digest, parameter_rows, parameters, validate_tables
+from .store import Store, digest, parameter_rows, parameters
 from .targets import Target, script_revision
+from ._workers import Outcome, Worker, completed, measure
 
 
 def now() -> str:
@@ -124,8 +126,10 @@ class _Runner:
         supplied = vars(args) if isinstance(args, Namespace) else dict(args or {})
         options = dict(output="out", data=None, only=None, benchmarks=None, force=False,
                        dry_run=False, render_only=False, invocation=None, allow_dirty=False, timeout=None,
-                       commit="HEAD")
+                       commit="HEAD", jobs=os.cpu_count() or 1)
         options.update(parameters(supplied))
+        if type(options["jobs"]) is not int or options["jobs"] < 1:
+            raise ValueError("jobs must be a positive integer")
         timeout = options["timeout"]
         if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("timeout must be a finite positive number of seconds")
@@ -166,6 +170,8 @@ class _Runner:
                 config = parameters(raw)
                 if "benchmark" in config:
                     raise ValueError("benchmark is a reserved treatment field")
+                if "parallel" in config and type(config["parallel"]) is not bool:
+                    raise ValueError("treatment parallel must be a boolean")
                 treatment = {"benchmark": name, "repository": spec["repository"],
                              "commit": spec["commit"] or options["commit"], **config}
                 if any(not isinstance(treatment[key], str) or not treatment[key] for key in ("repository", "commit")):
@@ -279,89 +285,139 @@ class _Runner:
         if not any(row["environment_id"] == planned.environment_id for row in store.data["eval_environments"]):
             store.data["eval_environments"].extend(parameter_rows(planned.environment, environment_id=planned.environment_id))
 
-    def _collect(self, store: Store, plan: Plan, invocation: dict) -> tuple[int, list[str]]:
+    def _collect(self, store: Store, plan: Plan, invocation: dict, *, jobs: int) -> tuple[int, list[str]]:
         errors = []
         collected = 0
+        pending = {}
         with ExitStack() as stack:
             directories = {}
             binaries = {}
-            for planned in plan.runs.values():
-                if planned.blocked:
-                    prior = planned.blocked
-                    remedy = "increase --timeout or use --force" if prior["status"] == "timed-out" else "use --force to retry"
-                    errors.append(f"{planned.benchmark.name}@{planned.target.commit[:12]}: cached {prior['status']} "
-                                  f"at {prior['timeout']:g}s; {remedy}. {prior['error'] or ''}")
-                    continue
-                if not planned.missing:
-                    continue
-                self._register_run_metadata(store, planned)
-                benchmark, target = planned.benchmark, planned.target
-                row = dict(run_id=str(uuid.uuid4()), invocation_id=invocation["invocation_id"],
-                           cache_key=planned.key, cacheable=not target.dirty, benchmark=benchmark.name,
-                           repository=target.identity, requested_ref=target.ref, commit=target.commit,
-                           dirty=target.dirty, runner_id=planned.runner_id, data_version=benchmark.version, config_id=planned.config_id,
-                           environment_id=planned.environment_id,
-                           timeout=benchmark.timeout, started_at=now(), finished_at=None,
-                           status="running", seconds=None, binary_sha256=None, error=None)
-                store.data["eval_runs"].append(row)
-                store.data["eval_inputs"].extend(dict(item, run_id=row["run_id"]) for item in planned.inputs)
-                store.save()
-                contexts = []
-                started = time.perf_counter()
+
+            def finish(attempt, outcome):
+                nonlocal collected
+                planned, row, started, directory, contexts, checkout = attempt
                 try:
-                    target_key = (target.identity, target.commit, target.working)
-                    if target_key not in directories:
-                        directories[target_key] = stack.enter_context(target.checkout())
-                    directory = directories[target_key]
-                    if target.input_hashes(benchmark.inputs) != planned.inputs:
-                        raise ValueError("declared inputs changed after planning")
-                    binary = None
-                    if benchmark.build:
-                        build_key = digest([*target_key, callable_identity(benchmark.build),
-                                            parameters(benchmark.build_config), planned.environment_id,
-                                            planned.runner_id, planned.inputs])
-                        if build_key not in binaries:
-                            build_context = RunContext(directory, parameters(benchmark.build_config),
-                                                       target.commit, benchmark.timeout, benchmark.environment)
-                            contexts.append(build_context)
-                            binary = Path(benchmark.build(build_context))
-                            binary = binary if binary.is_absolute() else directory / binary
-                            if not binary.is_file():
-                                raise ValueError("build callback did not produce a file")
-                            binaries[build_key] = binary
-                        binary = binaries[build_key]
-                        row["binary_sha256"] = file_digest(binary)
-                    context = RunContext(directory, planned.config, target.commit,
-                                         benchmark.timeout, benchmark.environment, binary)
-                    contexts.append(context)
-                    if target.materialized_input_hashes(directory, benchmark.inputs) != planned.inputs:
-                        raise ValueError("declared inputs changed while preparing the target")
-                    tables = benchmark.run(context)
-                    validate_tables(tables, user=True)
-                    if target.materialized_input_hashes(directory, benchmark.inputs) != planned.inputs:
-                        raise ValueError("declared inputs changed during collection")
-                    for name, rows in tables.items():
-                        store.data.setdefault(name, []).extend(dict(item, run_id=row["run_id"]) for item in rows)
-                    row["status"] = "success"
-                    planned.selected = row
-                    collected += 1
-                except KeyboardInterrupt:
-                    row.update(status="interrupted", error="interrupted by user")
-                    raise
-                except Exception as error:
-                    row.update(status=error.result.status if isinstance(error, ProcessError) else "failure", error=str(error))
-                    errors.append(f"{benchmark.name}@{target.commit[:12]}: {error}")
-                finally:
-                    row.update(finished_at=now(), seconds=time.perf_counter() - started)
-                    for context in contexts:
-                        for process in context.processes:
-                            process_id = str(uuid.uuid4())
-                            store.data["eval_processes"].append(dict(process_id=process_id, run_id=row["run_id"],
-                                cwd=process.cwd, seconds=process.seconds, returncode=process.returncode,
-                                stdout=process.stdout, stderr=process.stderr, status=process.status))
-                            store.data["eval_commands"].extend(dict(process_id=process_id, run_id=row["run_id"],
-                                position=i, value=value) for i, value in enumerate(process.argv))
+                    if outcome.status == "success":
+                        try:
+                            if planned.target.materialized_input_hashes(directory, planned.benchmark.inputs) != planned.inputs:
+                                raise ValueError("declared inputs changed during collection")
+                        except Exception as error:
+                            outcome = Outcome(processes=outcome.processes, status="failure", error=str(error))
+                    row.update(status=outcome.status, error=outcome.error,
+                               finished_at=now(), seconds=time.perf_counter() - started)
+                    if outcome.status == "success":
+                        for name, rows in outcome.tables.items():
+                            store.data.setdefault(name, []).extend(dict(item, run_id=row["run_id"]) for item in rows)
+                        planned.selected = row
+                        collected += 1
+                    else:
+                        errors.append(f"{planned.benchmark.name}@{planned.target.commit[:12]}: {outcome.error}")
+                    processes = [process for context in contexts for process in context.processes] + outcome.processes
+                    for process in processes:
+                        process_id = str(uuid.uuid4())
+                        store.data["eval_processes"].append(dict(process_id=process_id, run_id=row["run_id"],
+                            cwd=process.cwd, seconds=process.seconds, returncode=process.returncode,
+                            stdout=process.stdout, stderr=process.stderr, status=process.status))
+                        store.data["eval_commands"].extend(dict(process_id=process_id, run_id=row["run_id"],
+                            position=i, value=value) for i, value in enumerate(process.argv))
                     store.save()
+                finally:
+                    checkout.close()
+
+            def receive():
+                worker = completed(pending)
+                outcome = worker.result()
+                finish(pending.pop(worker), outcome)
+                if outcome.status == "interrupted":
+                    raise KeyboardInterrupt
+
+            try:
+                for planned in plan.runs.values():
+                    if planned.blocked:
+                        prior = planned.blocked
+                        remedy = "increase --timeout or use --force" if prior["status"] == "timed-out" else "use --force to retry"
+                        errors.append(f"{planned.benchmark.name}@{planned.target.commit[:12]}: cached {prior['status']} "
+                                      f"at {prior['timeout']:g}s; {remedy}. {prior['error'] or ''}")
+                        continue
+                    if not planned.missing:
+                        continue
+                    parallel = planned.config.get("parallel", False) and jobs > 1
+                    # Unmarked treatments are barriers: they run with no other collectors active.
+                    while pending and (not parallel or len(pending) >= jobs):
+                        receive()
+                    self._register_run_metadata(store, planned)
+                    benchmark, target = planned.benchmark, planned.target
+                    row = dict(run_id=str(uuid.uuid4()), invocation_id=invocation["invocation_id"],
+                               cache_key=planned.key, cacheable=not target.dirty, benchmark=benchmark.name,
+                               repository=target.identity, requested_ref=target.ref, commit=target.commit,
+                               dirty=target.dirty, runner_id=planned.runner_id, data_version=benchmark.version, config_id=planned.config_id,
+                               environment_id=planned.environment_id,
+                               timeout=benchmark.timeout, started_at=now(), finished_at=None,
+                               status="running", seconds=None, binary_sha256=None, error=None)
+                    store.data["eval_runs"].append(row)
+                    store.data["eval_inputs"].extend(dict(item, run_id=row["run_id"]) for item in planned.inputs)
+                    store.save()
+                    contexts = []
+                    checkout = ExitStack()
+                    started = time.perf_counter()
+                    directory = None
+                    try:
+                        target_key = (target.identity, target.commit, target.working)
+                        if target.input_hashes(benchmark.inputs) != planned.inputs:
+                            raise ValueError("declared inputs changed after planning")
+                        if (not parallel or benchmark.build) and target_key not in directories:
+                            directories[target_key] = stack.enter_context(target.checkout())
+                        binary = None
+                        if benchmark.build:
+                            build_key = digest([*target_key, callable_identity(benchmark.build),
+                                                parameters(benchmark.build_config), planned.environment_id,
+                                                planned.runner_id, planned.inputs])
+                            if build_key not in binaries:
+                                build_directory = directories[target_key]
+                                context = RunContext(build_directory, parameters(benchmark.build_config),
+                                                     target.commit, benchmark.timeout, benchmark.environment)
+                                contexts.append(context)
+                                binary = Path(benchmark.build(context))
+                                binary = binary if binary.is_absolute() else build_directory / binary
+                                if not binary.is_file():
+                                    raise ValueError("build callback did not produce a file")
+                                if target.materialized_input_hashes(build_directory, benchmark.inputs) != planned.inputs:
+                                    raise ValueError("declared inputs changed during the build")
+                                binaries[build_key] = binary
+                            binary = binaries[build_key]
+                            row["binary_sha256"] = file_digest(binary)
+                        directory = checkout.enter_context(target.checkout()) if parallel else directories[target_key]
+                        if target.materialized_input_hashes(directory, benchmark.inputs) != planned.inputs:
+                            raise ValueError("declared inputs changed while preparing the target")
+                        arguments = (directory, planned.config, target.commit,
+                                     benchmark.timeout, dict(benchmark.environment), binary)
+                        if parallel:
+                            worker = Worker(benchmark.run, arguments)
+                            pending[worker] = (planned, row, started, directory, contexts, checkout)
+                            continue
+                        outcome = measure(benchmark.run, arguments)
+                    except KeyboardInterrupt:
+                        finish((planned, row, started, directory, contexts, checkout),
+                               Outcome(status="interrupted", error="interrupted by user"))
+                        raise
+                    except Exception as error:
+                        outcome = Outcome(status=error.result.status if isinstance(error, ProcessError) else "failure",
+                                          error=str(error))
+                    finish((planned, row, started, directory, contexts, checkout), outcome)
+                    if outcome.status == "interrupted":
+                        raise KeyboardInterrupt
+                while pending:
+                    receive()
+            finally:
+                # Cancel workers before removing worktrees, retaining command diagnostics.
+                for worker in pending:
+                    worker.cancel()
+                while pending:
+                    worker = completed(pending)
+                    outcome = worker.result()
+                    if outcome.status == "failure":
+                        outcome.status = "interrupted"
+                    finish(pending.pop(worker), outcome)
         return collected, errors
 
     @staticmethod
@@ -453,7 +509,7 @@ class _Runner:
             reused = plan.reused
             invocation = self._invocation(store, options, tokens)
             try:
-                collected, errors = self._collect(store, plan, invocation)
+                collected, errors = self._collect(store, plan, invocation, jobs=options["jobs"])
                 ready, selections = self._selections(store, plan, invocation["invocation_id"])
                 invocation.update(status="failure" if errors else "success", finished_at=now())
                 store.save()

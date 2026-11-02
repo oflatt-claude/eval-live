@@ -62,9 +62,14 @@ adapter using the same API.
 
    python demo/egglog_eval.py --repository /path/to/egglog-encoding --binary /path/to/egglog-experimental --samples 1
 
-This example selects committed workload files and fingerprints a separately
-supplied engine binary. It does not assert that the binary was built from the
-workload's commit. It adapts the reference evaluator's off/proofs/proof-testing
-commands and normalizes schema-4 timing summaries into timing, phase, and
+``--binary`` selects the executable; ``--repository`` and ``--commit`` select
+the ``.egg`` input files. The script declares a cross product of files, modes,
+and samples, then registers one collector that runs any of those treatments.
+``--modes`` selects off/proofs/proof-testing commands and normalizes schema-4 timing summaries into timing, phase, and
 ruleset tables. Repeating the command reuses exact observations; changing the
 binary or workload content invalidates them.
+
+Outputs in both demos use decorator registration, such as ``@reg.table("Timings")``.
+The direct ``reg.table("Timings", timings)`` form is still supported. To allow
+concurrent collection, mark treatments with ``parallel=True`` and use ``--jobs``
+to cap workers. The demos expose this through ``--parallel --jobs 4``.

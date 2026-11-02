@@ -48,7 +48,10 @@ Force runs retain previous attempts and selections. Failed/timed-out attempts
 never satisfy a treatment's data requirement. A run left in ``running``
 state by a stopped process becomes ``interrupted`` when the next writer starts.
 
-The full treatment and CLI measurement parameters form the configuration key.
+The full treatment and CLI measurement parameters form the configuration key,
+including the treatment's ``parallel`` flag (when supplied) and resolved
+``jobs`` worker limit. Parallel workers never write this file; the parent
+checkpoints each completed attempt.
 Repetitions are user-defined fields such as ``sample``; a CLI sample count is
 also part of the configuration by default. There is no library sample counter.
 Each attempt has a ``run_id`` linking its table rows to configuration and

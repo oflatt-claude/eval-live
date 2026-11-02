@@ -6,6 +6,22 @@ from statistics import median
 import eval_live
 
 
+reg = eval_live.Registry(selection_arguments=["sizes", "repository", "baseline"],
+                         title="Membership paper evaluation")
+
+
+def current(treatments):
+    return [t for t in treatments if t["revision"] == "current"]
+
+
+def narrow_summary(rows, data):
+    keys = {(row["algorithm"], row["size"]) for row in rows}
+    return {**data, "measurements": [row for row in data["measurements"]
+            if (row["algorithm"], row["size"]) in keys]}
+
+
+@reg.table("Summary", requires={"current": current}, filter_source=narrow_summary,
+           caption="Median time for 200 lookups; lower is better.")
 def summary(data):
     """Compute medians from flat observations, including empty filtered data."""
     groups = defaultdict(list)
@@ -18,12 +34,7 @@ def summary(data):
     ]
 
 
-def narrow_summary(rows, data):
-    keys = {(row["algorithm"], row["size"]) for row in rows}
-    return {**data, "measurements": [row for row in data["measurements"]
-            if (row["algorithm"], row["size"]) in keys]}
-
-
+@reg.graph("Runtime", requires={"current": current})
 def runtime(data):
     import matplotlib.pyplot as plt
 
@@ -43,6 +54,10 @@ def runtime(data):
     return fig
 
 
+@reg.graph("Commit comparison", id="history", requires={
+    "baseline": lambda ts: [t for t in ts if t["revision"] == "baseline" and t["algorithm"] == "set"],
+    "candidate": lambda ts: [t for t in ts if t["revision"] == "current" and t["algorithm"] == "set"],
+})
 def history(data):
     import matplotlib.pyplot as plt
 
@@ -64,6 +79,7 @@ def history(data):
     return fig
 
 
+@reg.macros("Paper numbers", requires={"current": current}, id="macros")
 def numbers(data):
     rows = summary(data)
     return {"EvalSamples": len(data["measurements"]),
@@ -83,49 +99,9 @@ def membership(context):
     return {"measurements": [{**json.loads(result.stdout), "sample": context.config["sample"]}]}
 
 
-def make_repository(path):
-    """Create a tiny two-commit fixture, without a clone or external compiler."""
-    import subprocess
-
-    if (path / ".git").exists():
-        return
-    if path.exists() and any(path.iterdir()):
-        raise ValueError(f"refusing to initialize nonempty demo repository: {path}")
-    path.mkdir(parents=True, exist_ok=True)
-
-    def git(*args):
-        subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
-
-    worker = '''import json
-import random
-import sys
-from time import perf_counter
-
-size, algorithm, seed = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
-values = list(range(size))
-CONTAINER
-rng = random.Random(seed)
-queries = [rng.randrange(size * 2) for _ in range(200)]
-started = perf_counter()
-found = sum(value in container for value in queries)
-seconds = perf_counter() - started
-assert found == sum(value < size for value in queries)
-print(json.dumps(dict(size=size, algorithm=algorithm, seed=seed,
-                     queries=len(queries), found=found, seconds=seconds)))
-'''
-    git("init", "-b", "main")
-    for message, container in (
-        ("Baseline list membership", "container = values"),
-        ("Use a set for the set configuration", "container = set(values) if algorithm == 'set' else values"),
-    ):
-        (path / "membership.py").write_text(worker.replace("CONTAINER", container), encoding="utf-8")
-        git("add", "membership.py")
-        git("-c", "user.name=eval-live demo", "-c", "user.email=demo@example.invalid",
-            "-c", "commit.gpgsign=false", "commit", "-m", message)
-
-
 def main(argv=None):
     import argparse
+    from fixture import make_repository
     from pathlib import Path
     import sys
 
@@ -136,6 +112,7 @@ def main(argv=None):
     parser.add_argument("--baseline", default="HEAD~1", help="baseline commit for the history figure")
     parser.add_argument("--repository", type=Path, default=Path(__file__).resolve().parent / "out" / "repository")
     parser.add_argument("--samples", type=int, default=3, help="repetitions per configuration")
+    parser.add_argument("--parallel", action="store_true", help="allow concurrent treatments, limited by --jobs")
     tokens = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(tokens)
     if args.samples < 1:
@@ -149,28 +126,15 @@ def main(argv=None):
             make_repository(args.repository)
 
     treatments = [
-        {"size": size, "algorithm": algorithm, "seed": args.seed, "commit": commit, "sample": sample}
-        for commit in (args.baseline, args.commit)
+        {"size": size, "algorithm": algorithm, "seed": args.seed,
+         "revision": revision, "commit": commit, "sample": sample, "parallel": args.parallel}
+        for revision, commit in (("baseline", args.baseline), ("current", args.commit))
         for size in args.sizes
         for algorithm in ("list", "set")
         for sample in range(args.samples)
     ]
-    reg = eval_live.Registry(selection_arguments=["sizes", "repository", "baseline"],
-                             browser_source=Path(__file__), title="Membership paper evaluation")
-    reg.benchmark("membership", membership, version="2", inputs=["membership.py"],
+    reg.benchmark("membership", membership, version="3", inputs=["membership.py", "container.py"],
                   treatments=treatments, repository=args.repository)
-
-    def current(treatments):
-        return [t for t in treatments if t["commit"] == args.commit]
-
-    reg.graph("Runtime", runtime, requires={"current": current})
-    reg.table("Summary", summary, requires={"current": current}, filter_source=narrow_summary,
-              caption="Median time for 200 lookups; lower is better.")
-    reg.graph("Commit comparison", history, id="history", requires={
-        "baseline": lambda ts: [t for t in ts if t["commit"] == args.baseline and t["algorithm"] == "set"],
-        "candidate": lambda ts: [t for t in ts if t["commit"] == args.commit and t["algorithm"] == "set"],
-    })
-    reg.macros("Paper numbers", numbers, requires={"current": current}, id="macros")
     try:
         result = reg.run(args=args, argv=tokens)
     except (ValueError, RuntimeError) as error:

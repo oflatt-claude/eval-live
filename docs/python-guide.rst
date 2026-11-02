@@ -93,10 +93,9 @@ Omitting ``requires`` selects the whole catalog. No selection DSL is needed.
 
 .. code-block:: python
 
+   @reg.table("Selected suites", requires=needed)
    def summary(data):
        return [{"observations": len(data.get("measurements", []))}]
-
-   reg.table("Selected suites", summary, requires=needed)
    reg.table("All treatments", summary)  # everything declared
    reg.run(args=args, argv=tokens)
 
@@ -131,6 +130,12 @@ For comparisons, name selector functions and use ``select(data, name)``:
    >>> candidate_data["measurements"].clear()
    >>> len(snapshot["measurements"])
    1
+
+Use ``@reg.graph(...)``, ``@reg.table(...)``, ``@reg.macros(...)``, or
+``@reg.benchmark(...)`` to register a function where it is defined. Decorators
+return the original function, so callbacks can still call each other. The
+existing ``reg.table(name, function)`` form remains supported; it is useful
+when treatments depend on CLI arguments parsed in ``main``.
 
 Graphs return matplotlib Figures; tables return lists of row dictionaries,
 including styled cells. ``reg.macros(name, fn)`` registers a callback returning
@@ -191,14 +196,48 @@ requires recollection. Existing observations retain their original version;
 new invocations select data using the current identity. Changes to rendering
 alone reuse data. This version is independent of the JSON container's schema.
 
+Opt in to parallel collection
+-----------------------------
+
+Treatments run sequentially by default. Add ``"parallel": True`` to treatments
+that can safely run together:
+
+.. code-block:: python
+
+   treatments = [{"suite": suite, "parallel": True} for suite in suites]
+   reg.benchmark("solver", run_solver, version="1", treatments=treatments)
+
+Marked treatments run in separate Python processes, using at most ``--jobs N``
+workers (default: ``os.cpu_count()`` or 1). This supports CPU-bound Python as
+well as external commands. ``--jobs 1`` runs everything sequentially. Unmarked
+treatments, including ``parallel=False``, run alone: pending workers finish
+before they start, and subsequent workers wait for them to finish.
+
+Parallel collectors must be importable top-level functions; guard script
+execution with ``if __name__ == '__main__'``. Each committed parallel treatment
+gets its own temporary worktree. Build outputs are shared and should be treated
+as read-only; absolute external paths and ``WORKTREE`` files remain shared.
+Only mark treatments whose shared resources allow concurrent use.
+
+The flag and resolved worker limit are saved with the configuration and affect
+cache identity, since concurrency can affect measurements. Workers return data
+to the parent, which checkpoints completed attempts to the single JSON file.
+Timeout retries and failure caching work the same way as sequential collection.
+
+Both demos expose ``--parallel`` to mark their treatment lists. For example:
+
+.. code-block:: bash
+
+   python demo/eval.py --parallel --jobs 4
+
 Timeouts, failures, and replay
 ------------------------------
 
 ``timeout=60`` on a benchmark sets a deadline per command; ``--timeout`` overrides
 it. Timeouts terminate the process group on POSIX and preserve captured output.
 Arbitrary Python callbacks are not preempted; use ``context.command`` for work
-that needs a deadline. Collection is sequential, checkpoints every attempt,
-and continues independent treatments after failures.
+that needs a deadline. Collection checkpoints every attempt and continues
+independent treatments after failures.
 
 Timeout is a retry bound, separate from measurement identity. Increasing it
 preserves successes and permits retries of timed-out treatments. An equal or
@@ -246,7 +285,8 @@ Handle empty filtered data in graph/table callbacks.
 
 Open the HTML directly. Raw tables need no Python runtime; computed tables and
 graphs fetch Pyodide and matplotlib from a pinned CDN. The browser never runs
-benchmarks. The demo's complete registry setup is:
+benchmarks. Outputs are registered with decorators above their callbacks; the
+demo's entry point declares treatments and starts collection:
 
 .. literalinclude:: ../demo/eval.py
    :language: python

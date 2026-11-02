@@ -20,7 +20,9 @@ webpage from the same definitions.
 
 Use one `Registry` for benchmarks and paper outputs. The original
 `reg.graph(name, fn)` and `reg.table(name, fn)` API now accepts `requires=`;
-callbacks still receive ordinary data dictionaries. Register benchmark
+callbacks still receive ordinary data dictionaries. Decorators such as
+`@reg.graph("Runtime", requires=needed)` register functions where they are
+defined. Register benchmark
 callbacks and call `reg.run()` to collect, cache, and render:
 
 ```python
@@ -40,6 +42,11 @@ deduplicated before collection. Repetitions are ordinary treatment fields
 such as `sample`; callbacks compute averages or other statistics. CLI
 measurement parameters—including a script's total sample count—and the
 declared data `version` participate in cache identity and are saved with results.
+
+Treatments run sequentially by default. Mark a treatment with `parallel=True`
+to allow separate worker processes; `--jobs N` caps concurrency (default: CPU
+count). Unmarked treatments run alone. The flag and worker limit are included
+in the saved configuration and cache key. Only the parent writes the JSON file.
 
 Existing methods for rendering supplied data still work. See the
 [Python guide](docs/python-guide.rst) and [data format](docs/data-format.rst).

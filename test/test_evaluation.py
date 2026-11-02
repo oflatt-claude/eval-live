@@ -4,10 +4,12 @@ Run: python -m unittest discover -s test -p 'test_evaluation.py'
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 from types import ModuleType
 import unittest
 from unittest.mock import patch
@@ -39,6 +41,32 @@ def timed_collect(context):
     if context.config.get("delayed") or (context.config.get("after_first") and context.config.get("sample", 0) > 0):
         context.command([sys.executable, "-c", "import time; time.sleep(0.1)"])
     return {"measurements": [{"value": 20, "sample": context.config.get("sample", 0)}]}
+
+
+def concurrent_collect(context):
+    started = time.monotonic()
+    token = context.config["case"]
+    scratch = context.directory / "scratch"
+    scratch.write_text(token)
+    if context.config.get("rendezvous"):
+        barrier = Path(context.config["rendezvous"])
+        (barrier / token).touch()
+        while len(list(barrier.iterdir())) < 2:
+            if time.monotonic() - started > 10:
+                raise RuntimeError("collectors did not overlap")
+            time.sleep(0.01)
+    time.sleep(0.15)
+    assert scratch.read_text() == token, "concurrent collectors shared a worktree"
+    return {"measurements": [{"value": 20, "case": token, "pid": os.getpid(),
+                               "started": started, "finished": time.monotonic()}]}
+
+
+def interrupted_collect(context):
+    context.command([sys.executable, "-c",
+                     "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+                     "print('started', flush=True); time.sleep(30)",
+                     str(Path(context.config["pids"]) / context.config["case"])])
+    return {}
 
 
 def build(context):
@@ -147,6 +175,130 @@ class EvaluationTests(unittest.TestCase):
 
     def stored(self):
         return eval_live.Store(self.data).data
+
+    def parallel_registry(self, treatments, callback=concurrent_collect, **options):
+        reg = eval_live.Registry()
+        reg.benchmark("read", callback, version="1", repository=self.repo,
+                      inputs=["value.txt"], treatments=treatments, **options)
+        reg.table("Values", table)
+        return reg
+
+    def test_parallel_workers_overlap_obey_limit_and_isolate_serial_treatments(self):
+        barrier = self.root / "barrier"
+        barrier.mkdir()
+        treatments = [{"case": str(i), "parallel": i != 3,
+                       **({"rendezvous": str(barrier)} if i < 2 else {})} for i in range(6)]
+        reg = self.parallel_registry(treatments)
+        self.assertEqual(self.run_eval(reg, jobs=2).collected, 6)
+        rows = sorted(self.stored()["measurements"], key=lambda row: row["case"])
+        self.assertLess(max(r["started"] for r in rows[:2]), min(r["finished"] for r in rows[:2]))
+        self.assertTrue(all(r["pid"] != os.getpid() for r in rows if r["case"] != "3"))
+        self.assertEqual(rows[3]["pid"], os.getpid())
+        self.assertLessEqual(max(r["finished"] for r in rows[:3]), rows[3]["started"])
+        self.assertLessEqual(rows[3]["finished"], min(r["started"] for r in rows[4:]))
+        events = sorted([(r["started"], 1) for r in rows] + [(r["finished"], -1) for r in rows])
+        active = 0
+        for _, delta in events:
+            active += delta
+            self.assertLessEqual(active, 2)
+        self.assertEqual(self.run_eval(reg, jobs=2).reused, 6)
+        self.assertEqual(len(self.git("worktree", "list", "--porcelain").split("worktree ")) - 1, 1)
+
+    def test_unmarked_treatments_and_jobs_one_run_sequentially(self):
+        for parallel, jobs in ((False, 3), (True, 1)):
+            treatments = [{"case": str(i), **({"parallel": True} if parallel else {})} for i in range(3)]
+            self.run_eval(self.parallel_registry(treatments), jobs=jobs)
+            rows = self.stored()["measurements"][-3:]
+            self.assertTrue(all(r["pid"] == os.getpid() for r in rows))
+            self.assertTrue(all(a["finished"] <= b["started"] for a, b in zip(rows, rows[1:])))
+
+    def test_parallel_default_jobs_validation_and_configuration_identity(self):
+        with patch("os.cpu_count", return_value=2):
+            parser = eval_live.add_arguments(argparse.ArgumentParser())
+            self.assertEqual(parser.parse_args([]).jobs, 2)
+            reg = self.parallel_registry([{"case": "a", "parallel": True}], callback=collect)
+            self.assertEqual(self.run_eval(reg).collected, 1)
+            self.assertEqual(self.run_eval(reg, jobs=2).reused, 1)
+            self.assertEqual(self.run_eval(reg, jobs=1).collected, 1)
+            other = self.parallel_registry([{"case": "a", "parallel": False}], callback=collect)
+            self.assertEqual(self.run_eval(other, jobs=1).collected, 1)
+        for jobs in (0, -1, True, 1.5, "2", None):
+            with self.assertRaisesRegex(ValueError, "jobs"):
+                self.run_eval(reg, jobs=jobs)
+        for flag in (1, "true", None):
+            with self.assertRaisesRegex(ValueError, "parallel"):
+                self.run_eval(self.parallel_registry([{"parallel": flag}]))
+
+    def test_parallel_timeout_retries_only_timed_out_treatments(self):
+        reg = self.parallel_registry([{"parallel": True, "delayed": delayed} for delayed in (False, True)],
+                                     callback=timed_collect)
+        with self.assertRaises(eval_live.CollectionError):
+            self.run_eval(reg, jobs=2, timeout=0.01)
+        result = self.run_eval(reg, jobs=2, timeout=5)
+        self.assertEqual((result.collected, result.reused), (1, 1))
+        self.assertEqual(len(self.stored()["eval_runs"]), 3)
+        self.assertEqual([p["status"] for p in self.stored()["eval_processes"]], ["timed-out", "success"])
+
+    def test_parallel_builds_share_work_and_failures_keep_diagnostics(self):
+        reg = self.parallel_registry([{"parallel": True, "value": i} for i in range(3)],
+                                     callback=use_binary, build=build)
+        self.assertEqual(self.run_eval(reg, jobs=2).collected, 3)
+        self.assertEqual(len(BUILDS), 1)
+        reg = self.parallel_registry([{"parallel": True, "fail": fail} for fail in (True, False)], callback=collect)
+        with self.assertRaises(eval_live.CollectionError):
+            self.run_eval(reg, jobs=2)
+        self.assertEqual(self.stored()["eval_processes"][-1]["returncode"], 7)
+        self.assertIn("diagnostic", self.stored()["eval_processes"][-1]["stdout"])
+        self.assertEqual(len(self.stored()["measurements"]), 4)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal and process-group behavior")
+    def test_parallel_interrupt_stops_commands_and_checkpoints_attempts(self):
+        import signal
+        pids = self.root / "pids"
+        pids.mkdir()
+        script = self.root / "interrupt.py"
+        script.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+            "import eval_live\nfrom test_evaluation import interrupted_collect, constant_table\n"
+            "if __name__ == '__main__':\n"
+            "    reg = eval_live.Registry()\n"
+            f"    reg.benchmark('slow', interrupted_collect, version='1', repository={str(self.repo)!r}, "
+            f"treatments=[{{'case': str(i), 'parallel': True, 'pids': {str(pids)!r}}} for i in range(2)])\n"
+            "    reg.table('Counts', constant_table)\n"
+            f"    reg.run(args={{'output': {str(self.output)!r}, 'jobs': 2}})\n"
+        )
+        with subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+            try:
+                deadline = time.monotonic() + 15
+                while len(list(pids.iterdir())) < 2 and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(len(list(pids.iterdir())), 2, "workers did not start")
+                process.send_signal(signal.SIGINT)
+                _, stderr = process.communicate(timeout=10)
+                self.assertIn("KeyboardInterrupt", stderr)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+        data = self.stored()
+        self.assertEqual([r["status"] for r in data["eval_runs"]], ["interrupted", "interrupted"])
+        self.assertEqual([r["status"] for r in data["eval_processes"]], ["interrupted", "interrupted"])
+        self.assertEqual(data["eval_invocations"][0]["status"], "interrupted")
+        for path in pids.iterdir():
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(path.read_text()), 0)
+
+    def test_decorator_registration_preserves_functions_and_direct_registration(self):
+        reg = eval_live.Registry()
+        self.assertIs(reg.benchmark("read", version="1", repository=self.repo)(collect), collect)
+        self.assertIs(reg.table("Values")(table), table)
+        self.assertIs(reg.graph("Figure")(figure), figure)
+        self.assertIs(reg.macros("Numbers")(macros), macros)
+        self.assertIs(reg.table("Other", constant_table), constant_table)
+        result = self.run_eval(reg)
+        self.assertEqual(result.collected, 1)
+        self.assertEqual(len(reg._outputs), 4)
 
     def test_cache_hits_do_not_collect_or_checkout(self):
         first = self.run_eval()

@@ -33,6 +33,7 @@ python demo/eval.py --samples 5
 python demo/eval.py --only summary --sizes 500 2000
 python demo/eval.py --seed 42
 python demo/eval.py --timeout 60
+python demo/eval.py --parallel --jobs 4
 python demo/eval.py --force
 python demo/eval.py --render-only
 python demo/eval.py --help
@@ -64,14 +65,22 @@ to narrow observations and recompute graphs. Raw tables work without network
 access; interactive Python outputs fetch Pyodide and matplotlib from a CDN.
 The page does not collect measurements.
 
-Read [eval.py](eval.py) from the top: pure rendering callbacks, a benchmark
-callback, fixture setup, and the registry declarations in `main`. Callbacks
+Read [eval.py](eval.py) from the top: rendering callbacks registered with
+`@reg.table`, `@reg.graph`, and `@reg.macros`, then a collection function.
+`main` declares the treatment list, registers that one collector, and runs the
+evaluation. The fixture uses ordinary Python source files in [fixture/](fixture/). Callbacks
 receive ordinary data dictionaries; `select(data, name)` picks a named
 requirement for the commit comparison. Git
 worktrees, caching, sample selection, JSON persistence, LaTeX, and HTML assembly
 are handled by eval-live. The fixture is in `demo/out/repository`; `--commit`
 and `--baseline` select its revisions. `WORKTREE` explicitly selects current
 files, and dirty collection requires `--allow-dirty` and bypasses reuse.
+
+Collection is sequential by default. `--parallel` adds `parallel=True` to
+the treatment dictionaries so they can run in separate processes; `--jobs 4`
+limits concurrency to four workers. Unmarked treatments always run alone.
+The flag and worker count participate in cache identity. Concurrent timing
+measurements share machine resources, so use `--jobs 1` for sequential timings.
 
 Timings are illustrative and vary with machine load. Container construction is
 outside the timed region. Generated files are replaced individually; use a
@@ -82,3 +91,9 @@ The [Python guide](../docs/python-guide.rst) covers callback contracts and the
 [API reference](../docs/api.rst) is generated from docstrings. A second example,
 [egglog_eval.py](egglog_eval.py), adapts a real egglog workload when a compatible
 local repository and built binary are available.
+
+In the egglog example, `--binary` selects the executable and `--repository`/
+`--commit` select the `.egg` input files. One treatment list combines files,
+modes, and sample indices; one `measure` function runs each selected treatment.
+`--modes off proof-testing` selects two modes. The binary and input files are
+fingerprinted together, so changing either invalidates the cache.

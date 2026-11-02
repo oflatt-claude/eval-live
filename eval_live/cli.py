@@ -1,6 +1,7 @@
 """Shared CLI options for ordinary Python paper-evaluation scripts."""
 from argparse import ArgumentParser, ArgumentTypeError
 import math
+import os
 from pathlib import Path
 
 # These affect selection/output rather than individual measurements. All are
@@ -31,6 +32,8 @@ def add_arguments(parser: ArgumentParser, *, output: str | Path = "out") -> Argu
     parser.add_argument("--only", nargs="+", default=None, metavar="ARTIFACT", help="selected artifact IDs")
     parser.add_argument("--benchmarks", nargs="+", default=None, metavar="BENCHMARK", help="allowed benchmark names")
     parser.add_argument("--commit", default="HEAD", help="target commit/ref, or WORKTREE")
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1, metavar="N",
+                        help="maximum concurrent parallel=True treatments (default: CPU count); 1 runs sequentially")
     parser.add_argument("--timeout", type=positive_seconds, default=None, metavar="SECONDS",
                         help="per-command deadline (default: each Benchmark.timeout); increasing it retries cached timeouts")
     parser.add_argument("--force", action="store_true", help="collect fresh observations, retaining history")
