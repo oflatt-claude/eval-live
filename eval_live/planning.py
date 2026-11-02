@@ -151,7 +151,7 @@ class _Runner:
         options = self._options(args)
         return self._plan(options, Store(self._data_path(options)))
 
-    def _catalog(self, options: dict) -> dict[str, Mapping]:
+    def _catalog(self) -> dict[str, Mapping]:
         catalog = {}
         for name, spec in self.declarations.items():
             for raw in spec["treatments"]:
@@ -160,25 +160,31 @@ class _Runner:
                     raise ValueError("benchmark is a reserved treatment field")
                 if "parallel" in config and type(config["parallel"]) is not bool:
                     raise ValueError("treatment parallel must be a boolean")
-                treatment = {"benchmark": name, "repository": spec["repository"],
-                             "commit": spec["commit"] or options["commit"], **config}
-                if any(not isinstance(treatment[key], str) or not treatment[key] for key in ("repository", "commit")):
-                    raise ValueError("treatment repository and commit must be nonempty strings")
+                treatment = {"benchmark": name, "repository": spec["repository"], **config}
+                if not isinstance(treatment["repository"], str) or not treatment["repository"]:
+                    raise ValueError("treatment repository must be a nonempty string")
                 catalog[digest(treatment)] = MappingProxyType({
                     key: tuple(value) if isinstance(value, list) else value for key, value in treatment.items()
                 })
         return catalog
 
     @staticmethod
-    def _choose(selector, catalog: dict, label: str) -> list[Mapping]:
+    def _choose(selector, catalog: dict, label: str, commit: str) -> list[Mapping]:
+        def configuration(row):
+            return digest({key: value for key, value in row.items() if key != "commit"})
+
+        configurations = {configuration(parameters(row)) for row in catalog.values()}
         selected = {}
         try:
             rows = tuple(catalog.values())
             for row in rows if selector is None else selector(rows):
-                key = digest(parameters(row))
-                if key not in catalog:
+                requested = parameters(row)
+                if configuration(requested) not in configurations:
                     raise ValueError("selector returned a treatment outside the declared catalog")
-                selected[key] = catalog[key]
+                requested.setdefault("commit", commit)
+                if not isinstance(requested["commit"], str) or not requested["commit"]:
+                    raise ValueError("treatment commit must be a nonempty string")
+                selected[digest(requested)] = requested
         except Exception as error:
             raise ValueError(f"invalid treatment selection for {label}: {error}") from error
         return list(selected.values())
@@ -191,13 +197,13 @@ class _Runner:
         if allowed is not None and (not isinstance(allowed, list) or set(allowed) - self.benchmarks.keys()):
             raise ValueError("--benchmarks contains unknown benchmark names")
         plan = Plan(artifacts, {}, {})
-        catalog = self._catalog(options)
+        catalog = self._catalog()
         targets = {}
         for artifact in artifacts:
             plan.requirements[artifact.id] = {}
             for name, selector in artifact.requires.items():
                 requirements = []
-                for treatment in self._choose(selector, catalog, f"{artifact.id}/{name}"):
+                for treatment in self._choose(selector, catalog, f"{artifact.id}/{name}", options["commit"]):
                     benchmark_name = treatment["benchmark"]
                     if allowed is not None and benchmark_name not in allowed:
                         raise ValueError(f"benchmark subset excludes {benchmark_name!r}, required by {artifact.id}")

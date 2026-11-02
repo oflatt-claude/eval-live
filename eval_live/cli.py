@@ -23,7 +23,7 @@ def positive_seconds(value: str) -> float:
 def add_arguments(parser: ArgumentParser, *, output: str | Path = "out") -> ArgumentParser:
     """Add common options and return the parser for paper-specific additions.
 
-    ``commit`` supplies the default revision for declared treatments.
+    ``commit`` supplies the revision for requested treatments that omit it.
     Unknown script arguments affect cache identity unless explicitly excluded
     with ``Registry(selection_arguments=...)``. Every argument is saved.
     """

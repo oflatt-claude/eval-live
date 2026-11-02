@@ -184,12 +184,13 @@ class EvaluationTests(unittest.TestCase):
         self.git("add", "value.txt")
         self.git("-c", "user.name=Tests", "-c", "user.email=tests@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", str(value))
 
-    def request(self, *, samples=1, commit="HEAD", **config):
+    def request(self, *, samples=1, commit=None, **config):
         # Repetitions belong to the paper: each sample is an ordinary treatment.
-        self.treatments.extend({**config, "sample": i, "commit": commit} for i in range(samples))
+        self.treatments.extend({**config, "sample": i} for i in range(samples))
 
         def needed(treatments):
-            return [t for t in treatments if t["commit"] == commit and t["sample"] < samples
+            return [{**t, **({"commit": commit} if commit is not None else {})}
+                    for t in treatments if t["sample"] < samples
                     and {k: v for k, v in t.items() if k not in ("benchmark", "repository", "commit", "sample")} == config]
 
         return needed
@@ -461,6 +462,54 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(self.stored()["eval_selections"]), 4)
         self.assertEqual(self.run_eval(reg).reused, 2)
 
+    def test_requested_commits_default_override_and_share_observations(self):
+        reg = eval_live.Registry()
+        reg.benchmark("read", collect, version="1", repository=self.repo,
+                      treatments=[{"sample": 0}, {"sample": 1}], error_rows=error_rows)
+        seen = []
+
+        def history(treatments):
+            seen.extend(dict(t) for t in treatments)
+            treatment = next(t for t in treatments if t["sample"] == 0)
+            return [treatment, {**treatment, "commit": "HEAD"},
+                    {**treatment, "commit": self.head}, {**treatment, "commit": self.old}]
+
+        reg.table("Current", table, id="current")
+        reg.table("History", table, requires=history, id="history")
+        plan = reg.plan(args={"output": self.output})
+        self.assertEqual(len(plan.runs), 3)
+        current = plan.requirements["current"]["data"]
+        comparison = plan.requirements["history"]["data"]
+        self.assertEqual(len(current), 2)
+        self.assertEqual({plan.runs[key].target.commit for key in current}, {self.head})
+        self.assertEqual(len(comparison), 2)
+        self.assertEqual({plan.runs[key].target.commit for key in comparison}, {self.head, self.old})
+        self.assertEqual(len(set(current) & set(comparison)), 1)
+        self.assertEqual(self.run_eval(reg).collected, 3)
+        self.assertTrue(all("commit" not in t for t in seen))
+        self.assertEqual({row["name"] for row in self.stored()["eval_configs"]
+                          if row["scope"] == "request"}, {"sample"})
+
+        result = self.run_eval(reg, only=["current"], commit=self.old)
+        self.assertEqual((result.collected, result.reused), (1, 1))
+        replay = self.run_eval(reg)
+        self.assertEqual((replay.collected, replay.reused), (0, 3))
+
+    def test_selector_can_remove_declared_commit_to_use_cli_default(self):
+        reg = eval_live.Registry()
+        reg.benchmark("read", collect, version="1", repository=self.repo,
+                      treatments=[{"sample": 0, "commit": self.old}], error_rows=error_rows)
+        reg.table("Pinned", table, id="pinned")
+        reg.table("Default", table, requires=lambda ts: [
+            {key: value for key, value in treatment.items() if key != "commit"} for treatment in ts
+        ], id="default")
+        plan = reg.plan(args={"output": self.output})
+        self.assertEqual(len(plan.runs), 2)
+        for output, commit in (("pinned", self.old), ("default", self.head)):
+            key, = plan.requirements[output]["data"]
+            self.assertEqual(plan.runs[key].target.commit, commit)
+        self.assertFalse(self.output.exists())
+
     def test_python_selectors_filter_catalog_before_resolving_targets(self):
         reg = eval_live.Registry()
         reg.benchmark("read", collect, version="1", repository=self.repo, treatments=[
@@ -487,6 +536,8 @@ class EvaluationTests(unittest.TestCase):
             return treatments
 
         selectors = [mutate, lambda ts: [{**ts[0], "size": 99}], lambda ts: None]
+        selectors.extend(lambda ts, commit=commit: [{**ts[0], "commit": commit}]
+                         for commit in (None, "", 123, ["HEAD"]))
         for selector in selectors:
             reg = eval_live.Registry()
             reg.benchmark("read", collect, version="1", repository=self.repo, treatments=[{"size": 10}], error_rows=error_rows)

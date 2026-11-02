@@ -230,14 +230,15 @@ class Registry:
                  "has_interactive_filter": False, "caption": None}
                 for level, name in (("warning", "Warnings"), ("error", "Errors"))]
 
-    def benchmark(self, name, fn=None, *, version, error_rows, treatments=None, repository=".", commit=None, **options):
+    def benchmark(self, name, fn=None, *, version, error_rows, treatments=None, repository=".", **options):
         """Register ``fn(context) -> named flat tables`` for one observation.
 
         ``treatments`` is an iterable of configuration dictionaries (default:
         one empty configuration). Selectors see all registered treatments,
-        with ``benchmark``, ``repository``, and ``commit`` fields added. A
-        treatment can override repository/commit; otherwise use the registered
-        values and the CLI's ``--commit`` (default HEAD).
+        with ``benchmark`` and ``repository`` fields added. A treatment can
+        override the registered repository. Requested treatments without a
+        ``commit`` use the CLI's ``--commit`` (default HEAD). Output selectors
+        can add or change ``commit`` to request other revisions of a treatment.
 
         Required ``error_rows(treatment, status)`` returns named flat tables
         for ``pending``, ``timed-out``, ``failure``, and ``interrupted`` work.
@@ -261,7 +262,7 @@ class Registry:
         """
         if fn is None:
             return lambda callback: self.benchmark(name, callback, version=version, error_rows=error_rows, treatments=treatments,
-                                                   repository=repository, commit=commit, **options)
+                                                   repository=repository, **options)
         if not callable(fn):
             raise ValueError("benchmark callback must be callable")
         if name in self._benchmarks:
@@ -269,7 +270,7 @@ class Registry:
         self._benchmarks[name] = {
             "benchmark": dict(name=name, run=fn, version=version, error_rows=error_rows, **options),
             "treatments": tuple(dict(row) for row in ([{}] if treatments is None else treatments)),
-            "repository": str(repository), "commit": commit,
+            "repository": str(repository),
         }
         return fn
 
@@ -297,7 +298,10 @@ class Registry:
         treatments needed by this output before collection. Omit it to select
         the whole catalog. Interactive filtering never changes this selection.
         A mapping of named selector functions supports comparisons. Selectors
-        receive read-only dictionaries and must return members of the catalog.
+        receive read-only dictionaries and return declared treatments or copies.
+        Copies may add, change, or omit ``commit``; other configuration fields
+        must match a declared treatment. An omitted commit uses ``--commit``
+        (default HEAD). Commit aliases resolving to the same run share data.
         ``run`` passes only this output's selected observations to the callback.
         ``id`` defaults to a slug of the name and controls filenames and
         ``--only`` selection. Direct ``run_graphs(data)`` uses the supplied data.

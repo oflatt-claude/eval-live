@@ -61,8 +61,9 @@ there by default, without a shell, and record argv, duration, exit status,
 stdout, and stderr. Nonzero exits and timeouts raise ``ProcessError``.
 ``run_command`` also exposes this subprocess helper separately.
 
-``repository`` defaults to the current directory. ``commit`` defaults to the
-CLI's ``--commit`` (HEAD by default). Treatments can override either field.
+``repository`` defaults to the current directory. Requested treatments without
+``commit`` use the CLI's ``--commit`` (HEAD by default). Treatments can override
+the repository; output selectors can add or change their commit.
 Selectors see those fields and ``benchmark`` alongside the treatment's own
 parameters; these three reserved fields are omitted from ``context.config``.
 Refs resolve to full SHAs before cache lookup. ``WORKTREE`` explicitly selects
@@ -82,10 +83,16 @@ Select treatments with ordinary Python
 --------------------------------------
 
 An output's ``requires(treatments)`` function returns the treatments it needs.
-It receives all registered treatments as read-only dictionaries. Return
-members of that catalog, or equivalent copies; invented configurations are
-rejected. Lists, generators, comprehensions, and reusable functions all work.
-Omitting ``requires`` selects the whole catalog.
+It receives all registered treatments as read-only dictionaries, with
+``benchmark`` and ``repository`` added. Return those treatments or copies;
+copies may add, change, or omit ``commit``. Other configuration fields must
+match a declared treatment. Lists, generators, comprehensions, and reusable
+functions all work. Omitting ``requires`` selects the whole catalog.
+
+Commit defaults are applied after selection: any requested treatment without
+``commit`` uses ``--commit`` (HEAD by default). A figure opts into another
+commit by returning a copy with that field set. Commit aliases resolving to
+the same observation share work and cached data.
 
 .. doctest::
 
@@ -113,13 +120,32 @@ selected for that output. Use ``eval_runs`` and ``eval_configs`` for provenance;
 the :doc:`data-format` reference describes their fields. Callback inputs are
 copies, so changing them does not change the saved data.
 
-For comparisons, name selector functions and use ``select(data, name)``:
+For a comparison, request the same treatments at multiple commits:
+
+.. code-block:: python
+
+   reg.graph("History", history, requires=lambda ts: [
+       request for treatment in ts
+       for request in (treatment, {**treatment, "commit": "v1"})
+   ])
+
+The resolved commit is stored in ``eval_runs``; figure callbacks choose legend
+labels and join measurements to commits using ``run_id``.
+See the demo's comparison callback:
+
+.. literalinclude:: ../demo/eval.py
+   :language: python
+   :pyobject: history
+
+Named selectors can make it easier to retrieve each group with
+``select(data, name)``. These names identify output requirements and do not
+become treatment fields or affect cache identity:
 
 .. code-block:: python
 
    reg.graph("History", history, requires={
-       "baseline": lambda ts: [t for t in ts if t["commit"] == "v1"],
-       "candidate": lambda ts: [t for t in ts if t["commit"] == "HEAD"],
+       "baseline": lambda ts: [{**t, "commit": "v1"} for t in ts],
+       "candidate": lambda ts: ts,
    })
 
 .. doctest::

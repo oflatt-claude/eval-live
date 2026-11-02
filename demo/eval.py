@@ -10,17 +10,13 @@ reg = eval_live.Registry(selection_arguments=["sizes", "repository", "baseline"]
                          title="Membership paper evaluation")
 
 
-def current(treatments):
-    return [t for t in treatments if t["revision"] == "current"]
-
-
 def narrow_summary(rows, data):
     keys = {(row["algorithm"], row["size"]) for row in rows}
     return {**data, "measurements": [row for row in data["measurements"]
             if (row["algorithm"], row["size"]) in keys]}
 
 
-@reg.table("Summary", requires={"current": current}, interactive_filter=narrow_summary,
+@reg.table("Summary", interactive_filter=narrow_summary,
            caption="Median time for 200 lookups; lower is better.")
 def summary(data):
     """Compute medians from flat observations, including empty filtered data."""
@@ -40,7 +36,7 @@ def summary(data):
     return result
 
 
-@reg.graph("Runtime", requires={"current": current})
+@reg.graph("Runtime")
 def runtime(data):
     import matplotlib.pyplot as plt
 
@@ -60,21 +56,17 @@ def runtime(data):
     return fig
 
 
-@reg.graph("Commit comparison", id="history", requires={
-    "baseline": lambda ts: [t for t in ts if t["revision"] == "baseline" and t["algorithm"] == "set"],
-    "candidate": lambda ts: [t for t in ts if t["revision"] == "current" and t["algorithm"] == "set"],
-})
 def history(data):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(6, 3.5))
-    for name in ("baseline", "candidate"):
-        selected = eval_live.select(data, name)
+    for commit in dict.fromkeys(run["commit"] for run in data["eval_runs"]):
+        run_ids = {run["run_id"] for run in data["eval_runs"] if run["commit"] == commit}
+        selected = {**data, "measurements": [row for row in data["measurements"] if row["run_id"] in run_ids]}
         rows = [row for row in summary(selected) if row["median_ms"] is not None]
         if rows:
-            commit = selected["eval_runs"][0]["commit"][:8]
             ax.plot([r["size"] for r in rows], [r["median_ms"] for r in rows],
-                    marker="o", label=f"{name} ({commit})")
+                    marker="o", label=commit[:8])
     if ax.lines:
         ax.legend()
     else:
@@ -85,7 +77,7 @@ def history(data):
     return fig
 
 
-@reg.macros("Paper numbers", requires={"current": current}, id="macros")
+@reg.macros("Paper numbers", id="macros")
 def numbers(data):
     rows = summary(data)
     return {"EvalSamples": len(data["measurements"]),
@@ -139,14 +131,20 @@ def main(argv=None):
 
     treatments = [
         {"size": size, "algorithm": algorithm, "seed": args.seed,
-         "revision": revision, "commit": commit, "sample": sample, "parallel": args.parallel}
-        for revision, commit in (("baseline", args.baseline), ("current", args.commit))
+         "sample": sample, "parallel": args.parallel}
         for size in args.sizes
         for algorithm in ("list", "set")
         for sample in range(args.samples)
     ]
     reg.benchmark("membership", membership, version="4", error_rows=error_rows, inputs=["membership.py", "container.py"],
                   treatments=treatments, repository=args.repository)
+
+    def comparison_treatments(treatments):
+        return [request
+                for treatment in treatments if treatment["algorithm"] == "set"
+                for request in (treatment, {**treatment, "commit": args.baseline})]
+
+    reg.graph("Commit comparison", history, id="history", requires=comparison_treatments)
     try:
         result = reg.run(args=args, argv=tokens)
     except (ValueError, RuntimeError) as error:

@@ -42,7 +42,11 @@ reg.run(args=args, argv=tokens)
 ```
 
 Selectors are ordinary Python functions. Their results are combined and
-deduplicated before collection. Repetitions are ordinary treatment fields
+deduplicated before collection. Requested treatments without `commit` use
+`--commit` (HEAD by default). For a comparison, a selector can return copies
+of a treatment with different `commit` values. The resolved commit is saved
+as provenance; labels such as “baseline” belong in the figure.
+Repetitions are ordinary treatment fields
 such as `sample`; callbacks compute averages or other statistics. CLI
 measurement parameters—including a script's total sample count—and the
 declared data `version` participate in cache identity and are saved with results.
