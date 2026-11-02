@@ -20,7 +20,7 @@ from .eval_live import Registry, _Output
 from .benchmarks import Benchmark, ProcessError, RunContext, callable_identity, file_digest
 from .cli import CONTROL_ARGUMENTS
 from .render import render_artifacts
-from .store import Store, digest, parameter_rows, parameters
+from .store import Store, digest, parameter_rows, parameters, validate_tables
 from .targets import Target, script_revision
 from ._workers import Outcome, Worker, completed, measure
 
@@ -45,12 +45,12 @@ class PlannedRun:
     runner_id: str
     selected: dict | None = None
     needed_by: list[str] = field(default_factory=list)
-    blocked: dict | None = None
+    fallback: dict = field(default_factory=dict)
 
     @property
     def missing(self) -> int:
         """Number of additional observations eligible for collection."""
-        return int(self.selected is None and self.blocked is None)
+        return int(self.selected is None)
 
 
 @dataclass
@@ -73,13 +73,10 @@ class Plan:
         """Explain required runs, cache hits, and the artifacts needing them."""
         lines = [f"{len(self.artifacts)} artifacts; {self.reused} cached treatments; {self.missing} missing treatments"]
         for run in self.runs.values():
-            blocked = ""
-            if run.blocked:
-                remedy = "increase --timeout or use --force" if run.blocked["status"] == "timed-out" else "use --force"
-                blocked = f"; blocked by cached {run.blocked['status']} ({remedy})"
+            deadline = "none" if run.benchmark.timeout is None else f"{run.benchmark.timeout:g}s"
             lines.append(f"  {run.benchmark.name}@{run.target.commit[:12]} {run.config!r}: "
-                         f"{int(run.selected is not None)} cached, {run.missing} missing; timeout {run.benchmark.timeout:g}s; "
-                         f"needed by {', '.join(run.needed_by)}{blocked}")
+                         f"{int(run.selected is not None)} cached, {run.missing} missing; timeout {deadline}; "
+                         f"needed by {', '.join(run.needed_by)}")
         return "\n".join(lines)
 
 
@@ -93,15 +90,6 @@ class EvaluationResult:
     reused: int
     written: list[Path]
     plan: Plan | None = None
-
-
-class CollectionError(RuntimeError):
-    """Required data is incomplete; completed observations remain in the store."""
-
-    def __init__(self, errors: Sequence[str], result: EvaluationResult):
-        self.errors = tuple(errors)
-        self.result = result
-        super().__init__("evaluation incomplete: " + "; ".join(errors))
 
 
 class _Runner:
@@ -241,6 +229,11 @@ class _Runner:
                         plan.runs[key] = PlannedRun(key, benchmark, target, config, measurement_args,
                                                    environment, inputs, config_id, environment_id,
                                                    runner_id)
+                        fallback = {status: benchmark.fallback(config, status)
+                                    for status in ("pending", "timed-out", "failure", "interrupted")}
+                        if any(set(tables) != set(fallback["pending"]) for tables in fallback.values()):
+                            raise ValueError("error_rows must declare the same tables for every status")
+                        plan.runs[key].fallback = fallback
                     run = plan.runs[key]
                     reason = f"{artifact.id}/{name}"
                     if reason not in run.needed_by:
@@ -248,8 +241,7 @@ class _Runner:
                     if not target.dirty and not options["force"]:
                         cached = store.cached(key, timeout=benchmark.timeout)
                         latest = cached[-1] if cached else None
-                        run.selected = latest if latest and latest["status"] == "success" else None
-                        run.blocked = latest if latest and latest["status"] != "success" else None
+                        run.selected = latest if latest and (latest["status"] == "success" or latest.get("has_rows")) else None
                     if key not in requirements:
                         requirements.append(key)
                 plan.requirements[artifact.id][name] = requirements
@@ -260,7 +252,7 @@ class _Runner:
             if row["status"] == "running":
                 row.update(status="interrupted", finished_at=now())
         for row in store.data["eval_runs"]:
-            if row["status"] == "running":
+            if row["status"] in ("pending", "running"):
                 row.update(status="interrupted", finished_at=now(), error="previous writer stopped before completing this attempt")
         script = self.browser_source if isinstance(self.browser_source, Path) else None
         if script is None:
@@ -285,8 +277,35 @@ class _Runner:
         if not any(row["environment_id"] == planned.environment_id for row in store.data["eval_environments"]):
             store.data["eval_environments"].extend(parameter_rows(planned.environment, environment_id=planned.environment_id))
 
-    def _collect(self, store: Store, plan: Plan, invocation: dict, *, jobs: int) -> tuple[int, list[str]]:
-        errors = []
+    @staticmethod
+    def _replace_rows(store: Store, row: dict, tables: dict) -> None:
+        for name in set(tables) | {name for name in store.data if not name.startswith("eval_")}:
+            store.data[name] = [item for item in store.data.get(name, []) if item["run_id"] != row["run_id"]]
+            store.data[name].extend(dict(item, run_id=row["run_id"]) for item in tables.get(name, []))
+
+    def _reserve(self, store: Store, plan: Plan, invocation: dict) -> dict:
+        """Save every requested treatment's rows before executing any collector."""
+        attempts = {}
+        for planned in plan.runs.values():
+            if planned.selected is not None:
+                continue
+            self._register_run_metadata(store, planned)
+            benchmark, target = planned.benchmark, planned.target
+            row = dict(run_id=str(uuid.uuid4()), invocation_id=invocation["invocation_id"],
+                       cache_key=planned.key, cacheable=not target.dirty, benchmark=benchmark.name,
+                       repository=target.identity, requested_ref=target.ref, commit=target.commit,
+                       dirty=target.dirty, runner_id=planned.runner_id, data_version=benchmark.version,
+                       config_id=planned.config_id, environment_id=planned.environment_id,
+                       timeout=benchmark.timeout, started_at=None, finished_at=None,
+                       status="pending", seconds=None, binary_sha256=None, error=None, has_rows=True)
+            store.data["eval_runs"].append(row)
+            store.data["eval_inputs"].extend(dict(item, run_id=row["run_id"]) for item in planned.inputs)
+            self._replace_rows(store, row, planned.fallback["pending"])
+            planned.selected = row
+            attempts[planned.key] = row
+        return attempts
+
+    def _collect(self, store: Store, plan: Plan, attempts: dict, *, jobs: int) -> int:
         collected = 0
         pending = {}
         with ExitStack() as stack:
@@ -299,6 +318,9 @@ class _Runner:
                 try:
                     if outcome.status == "success":
                         try:
+                            validate_tables(outcome.tables, user=True)
+                            if any(not outcome.tables.get(name) for name in planned.fallback["pending"]):
+                                raise ValueError("collector must return rows in every table declared by error_rows")
                             if planned.target.materialized_input_hashes(directory, planned.benchmark.inputs) != planned.inputs:
                                 raise ValueError("declared inputs changed during collection")
                         except Exception as error:
@@ -306,12 +328,11 @@ class _Runner:
                     row.update(status=outcome.status, error=outcome.error,
                                finished_at=now(), seconds=time.perf_counter() - started)
                     if outcome.status == "success":
-                        for name, rows in outcome.tables.items():
-                            store.data.setdefault(name, []).extend(dict(item, run_id=row["run_id"]) for item in rows)
-                        planned.selected = row
-                        collected += 1
+                        tables = outcome.tables
                     else:
-                        errors.append(f"{planned.benchmark.name}@{planned.target.commit[:12]}: {outcome.error}")
+                        tables = planned.fallback[outcome.status]
+                    self._replace_rows(store, row, tables)
+                    collected += 1
                     processes = [process for context in contexts for process in context.processes] + outcome.processes
                     for process in processes:
                         process_id = str(uuid.uuid4())
@@ -333,29 +354,15 @@ class _Runner:
 
             try:
                 for planned in plan.runs.values():
-                    if planned.blocked:
-                        prior = planned.blocked
-                        remedy = "increase --timeout or use --force" if prior["status"] == "timed-out" else "use --force to retry"
-                        errors.append(f"{planned.benchmark.name}@{planned.target.commit[:12]}: cached {prior['status']} "
-                                      f"at {prior['timeout']:g}s; {remedy}. {prior['error'] or ''}")
-                        continue
-                    if not planned.missing:
+                    if planned.key not in attempts:
                         continue
                     parallel = planned.config.get("parallel", False) and jobs > 1
                     # Unmarked treatments are barriers: they run with no other collectors active.
                     while pending and (not parallel or len(pending) >= jobs):
                         receive()
-                    self._register_run_metadata(store, planned)
                     benchmark, target = planned.benchmark, planned.target
-                    row = dict(run_id=str(uuid.uuid4()), invocation_id=invocation["invocation_id"],
-                               cache_key=planned.key, cacheable=not target.dirty, benchmark=benchmark.name,
-                               repository=target.identity, requested_ref=target.ref, commit=target.commit,
-                               dirty=target.dirty, runner_id=planned.runner_id, data_version=benchmark.version, config_id=planned.config_id,
-                               environment_id=planned.environment_id,
-                               timeout=benchmark.timeout, started_at=now(), finished_at=None,
-                               status="running", seconds=None, binary_sha256=None, error=None)
-                    store.data["eval_runs"].append(row)
-                    store.data["eval_inputs"].extend(dict(item, run_id=row["run_id"]) for item in planned.inputs)
+                    row = attempts[planned.key]
+                    row.update(status="running", started_at=now())
                     store.save()
                     contexts = []
                     checkout = ExitStack()
@@ -418,7 +425,13 @@ class _Runner:
                     if outcome.status == "failure":
                         outcome.status = "interrupted"
                     finish(pending.pop(worker), outcome)
-        return collected, errors
+                for planned in plan.runs.values():
+                    if planned.key in attempts and attempts[planned.key]["status"] == "pending":
+                        row = attempts[planned.key]
+                        row.update(status="interrupted", finished_at=now(), error="evaluation stopped before collection")
+                        self._replace_rows(store, row, planned.fallback["interrupted"])
+                store.save()
+        return collected
 
     @staticmethod
     def _selections(store: Store, plan: Plan, invocation_id: str) -> tuple[list[_Output], dict]:
@@ -445,7 +458,8 @@ class _Runner:
         artifacts = self._artifacts(options)
         saved = options["invocation"]
         if saved is None:
-            candidates = [row for row in store.data["eval_invocations"] if row["status"] == "success"]
+            candidates = [row for row in store.data["eval_invocations"]
+                          if row.get("collection_complete", row["status"] == "success")]
             if not candidates:
                 raise ValueError("no completed invocation to render")
             saved = candidates[-1]["invocation_id"]
@@ -463,6 +477,7 @@ class _Runner:
                                             if row["requirement"] == name] for name in artifact.requires}
         invocation = self._invocation(store, options, argv)
         invocation["source_invocation"] = saved
+        invocation["collection_complete"] = True
         for artifact_id, scopes in selections.items():
             for name, ids in scopes.items():
                 store.data["eval_requirements"].append(dict(invocation_id=invocation["invocation_id"],
@@ -491,8 +506,8 @@ class _Runner:
         Default: all artifacts, reusable observations from ``out/results.json``.
         ``--dry-run`` returns a plan without writing. ``--render-only`` uses
         saved sample selections without resolving Git or invoking benchmarks.
-        Incomplete collection raises ``CollectionError`` after saving failures
-        and rendering independent artifacts whose requirements are complete.
+        Every requested treatment has rows before collection. Errors/timeouts
+        use explicit error rows; renderers decide whether to report messages.
         """
         options = self._options(args)
         tokens = list(sys.argv[1:] if argv is None else argv)
@@ -509,15 +524,14 @@ class _Runner:
             reused = plan.reused
             invocation = self._invocation(store, options, tokens)
             try:
-                collected, errors = self._collect(store, plan, invocation, jobs=options["jobs"])
+                attempts = self._reserve(store, plan, invocation)
                 ready, selections = self._selections(store, plan, invocation["invocation_id"])
-                invocation.update(status="failure" if errors else "success", finished_at=now())
                 store.save()
+                collected = self._collect(store, plan, attempts, jobs=options["jobs"])
+                invocation.update(status="success", finished_at=now(), collection_complete=True)
                 written = render_artifacts(store.data, ready, selections, Path(options["output"]).expanduser(),
                                            source=self.browser_source, title=self.title)
                 result = EvaluationResult(invocation["invocation_id"], store.path, collected, reused, written, plan)
-                if errors:
-                    raise CollectionError(errors, result)
                 return result
             except KeyboardInterrupt:
                 invocation["status"] = "interrupted"

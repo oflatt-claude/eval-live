@@ -122,10 +122,11 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
   let computedViews = [];
   let lastComputedRef = null;
   let lastUnfilteredRef = null;
+  let lastMessagesRef = null;
   function rebuildComputedViews() {
     computedContainer.innerHTML = "";
     computedViews = [];
-    for (const t of state.engine.computedTables) {
+    for (const t of [...state.engine.computedTables, ...state.engine.messages]) {
       if (!t.rows || t.rows.length === 0) continue;
       ensureTableUi(state, t.name, "computed");     // persist ui across rebuilds
       // Checkbox options come from the UNFILTERED version of this table, so
@@ -179,9 +180,11 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
     // Rebuild computed views when the displayed rows OR the unfiltered rows
     // (which feed the dropdown options) change.
     if (state.engine.computedTables !== lastComputedRef ||
-        state.engine.computedUnfiltered !== lastUnfilteredRef) {
+        state.engine.computedUnfiltered !== lastUnfilteredRef ||
+        state.engine.messages !== lastMessagesRef) {
       lastComputedRef = state.engine.computedTables;
       lastUnfilteredRef = state.engine.computedUnfiltered;
+      lastMessagesRef = state.engine.messages;
       rebuildComputedViews();
     }
     for (const v of computedViews) v.sync(state);

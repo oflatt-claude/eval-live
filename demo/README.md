@@ -9,8 +9,8 @@ python demo/eval.py
 
 This single script uses one `Registry` for its benchmark, graphs, table, and
 macros. It creates a tiny local Git repository with two commits and runs all
-four paper outputs. It compares list/set membership across input
-sizes and compares the same set configuration before and after an optimization.
+four paper outputs. It compares list/set membership across input sizes and
+the same set configuration before and after an optimization.
 No clone or compiler is needed. The full run requires 27 observations, shared
 across the artifact declarations.
 
@@ -39,7 +39,7 @@ python demo/eval.py --render-only
 python demo/eval.py --help
 ```
 
-`--render-only` uses the latest successful invocation's exact selections. If
+`--render-only` uses the latest completed collection's exact selections. If
 that invocation only contained a subset, pass the same `--only` selection or
 use `--invocation ID` to choose a complete run. No benchmark repository is
 needed for render-only use. Use `--data PATH` to share a cache across artifact
@@ -54,11 +54,19 @@ callback. `requires` functions select from the declared cross product; they
 skip unused baseline/list combinations. An output without a selector would
 request the whole catalog.
 
-`--timeout` overrides the benchmark's per-command deadline in seconds. If a
-command times out, raise the limit and run again: completed samples are reused
-and only the missing samples are collected. Repeating an equal or smaller
-limit leaves cached timeouts blocked. Use `--force` to retry anyway, including
-ordinary failures. Attempts keep their original deadlines and diagnostics.
+Timeouts are disabled by default. `--timeout SECONDS` opts into a deadline
+for each command. A timed-out or failed treatment still has an explicit row:
+`error_rows(treatment, status)` defines its null measurement and status.
+Every requested treatment has placeholder rows before execution starts.
+Increasing the deadline recollects timeouts and keeps successes; repeating it
+reuses timeout rows. `--force` recollects every selected treatment.
+
+The demo's rendering policy warns about timeouts and reports errors for failed
+treatments. Medians use completed measurements; the Summary retains requested
+and completed counts. Change the calls to `eval_live.warn` and `eval_live.error` in `summary` to
+choose a different reporting policy. Messages are deduplicated and computed
+fresh on rendering, never saved as measurements. Ctrl+C cancels the evaluation
+and its workers, preserves all requested rows, and skips rendering.
 
 Open the HTML directly. Filter Summary by `algorithm = 'set' AND size = 500`
 to narrow observations and recompute graphs. Raw tables work without network
@@ -66,15 +74,10 @@ access; interactive Python outputs fetch Pyodide and matplotlib from a CDN.
 The page does not collect measurements.
 
 Read [eval.py](eval.py) from the top: rendering callbacks registered with
-`@reg.table`, `@reg.graph`, and `@reg.macros`, then a collection function.
-`main` declares the treatment list, registers that one collector, and runs the
-evaluation. The fixture uses ordinary Python source files in [fixture/](fixture/). Callbacks
-receive ordinary data dictionaries; `select(data, name)` picks a named
-requirement for the commit comparison. Git
-worktrees, caching, sample selection, JSON persistence, LaTeX, and HTML assembly
-are handled by eval-live. The fixture is in `demo/out/repository`; `--commit`
-and `--baseline` select its revisions. `WORKTREE` explicitly selects current
-files, and dirty collection requires `--allow-dirty` and bypasses reuse.
+`@reg.table`, `@reg.graph`, and `@reg.macros`, followed by the error-row and
+collection functions. `main` declares the treatments and runs the evaluation.
+The fixture's source files are in [fixture/](fixture/); its generated repository
+is in `demo/out/repository`. `--commit` and `--baseline` select its revisions.
 
 Collection is sequential by default. `--parallel` adds `parallel=True` to
 the treatment dictionaries so they can run in separate processes; `--jobs 4`

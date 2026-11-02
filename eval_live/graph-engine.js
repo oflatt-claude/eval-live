@@ -84,10 +84,11 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
     return raw.map((g) => ({ name: g.get("name"), src: g.get("src") }));
   }
 
-  async function runTables(filteredData) {
+  async function runTables(filteredData, messages = false) {
     setData(filteredData);
     const proxy = await pyodide.runPythonAsync(
-      "import eval_live; eval_live.registry.run_tables(__eval_live_data__)");
+      messages ? "import eval_live; eval_live.registry.run_messages()" :
+        "import eval_live; eval_live.registry.run_tables(__eval_live_data__)");
     const raw = proxy.toJs({ create_pyproxies: false, dict_converter: (entries) => new Map(entries) });
     proxy.destroy();
     return raw.map((t) => ({
@@ -120,8 +121,9 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
     let registryFresh = false;
     async function freshRegistry() {
       if (registryFresh) return;
-      pyodide.runPython("import eval_live; eval_live.registry = None");
+      pyodide.runPython("import eval_live; __eval_live_messages__ = dict(eval_live.registry._messages) if eval_live.registry else {}; eval_live.registry = None");
       await pyodide.runPythonAsync(graphScript);
+      pyodide.runPython("eval_live.registry._messages.update(__eval_live_messages__)");
       registryFresh = true;
     }
 
@@ -178,6 +180,10 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
       await freshRegistry();
       const graphs = await runGraphs(eff);
       setState((s) => { s.engine.graphs = graphs; });
+    }
+    if (registryFresh) {
+      const messages = await runTables(eff, true);
+      setState((s) => { s.engine.messages = messages; });
     }
   }
 

@@ -5,10 +5,10 @@ from importlib.resources import files
 # `eval_live` IS the pyodide lib module) and locally (where `eval_live` is this
 # package). Local code can build a Registry and call `render_to_dir` to write
 # graphs/tables to disk without Pyodide.
-from .eval_live import Registry, registry, select  # noqa: F401
+from .eval_live import Registry, error, registry, select, warn  # noqa: F401
 from .benchmarks import Benchmark, ProcessError, ProcessResult, RunContext, run_command  # noqa: F401
 from .cli import add_arguments  # noqa: F401
-from .planning import CollectionError, EvaluationResult, Plan  # noqa: F401
+from .planning import EvaluationResult, Plan  # noqa: F401
 from .store import Store  # noqa: F401
 
 _PKG = files(__package__)

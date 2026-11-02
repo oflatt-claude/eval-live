@@ -18,16 +18,18 @@ reuses cached results identified by commit and command-line configuration,
 collects missing data, and generates the paper artifacts and an interactive
 webpage from the same definitions.
 
-Use one `Registry` for benchmarks and paper outputs. The original
-`reg.graph(name, fn)` and `reg.table(name, fn)` API now accepts `requires=`;
-callbacks still receive ordinary data dictionaries. Decorators such as
-`@reg.graph("Runtime", requires=needed)` register functions where they are
-defined. Register benchmark
-callbacks and call `reg.run()` to collect, cache, and render:
+Use one `Registry` for benchmarks, figures, tables, and macros. Register
+callbacks directly or with decorators such as `@reg.graph("Runtime")`.
+`requires=` selects treatments for an output; omitting it selects the entire
+catalog. Call `reg.run()` to collect, cache, and render:
 
 ```python
+def error_rows(treatment, status):
+    return {"measurements": [{"suite": treatment["suite"], "size": treatment["size"],
+                              "seconds": None, "status": status}]}
+
 reg = eval_live.Registry()
-reg.benchmark("worker", collect, version="1", inputs=["worker.py"],
+reg.benchmark("worker", collect, version="1", error_rows=error_rows, inputs=["worker.py"],
               treatments=[{"suite": suite, "size": size}
                           for suite in suites for size in sizes])
 reg.graph("Runtime", runtime,
@@ -46,10 +48,10 @@ declared data `version` participate in cache identity and are saved with results
 Treatments run sequentially by default. Mark a treatment with `parallel=True`
 to allow separate worker processes; `--jobs N` caps concurrency (default: CPU
 count). Unmarked treatments run alone. The flag and worker limit are included
-in the saved configuration and cache key. Only the parent writes the JSON file.
+in the saved configuration and cache key. JSON writes remain serialized.
 
-Existing methods for rendering supplied data still work. See the
-[Python guide](docs/python-guide.rst) and [data format](docs/data-format.rst).
+See the [Python guide](docs/python-guide.rst) for writing an evaluation and
+the [data format](docs/data-format.rst) for inspecting saved results.
 
 ## Demo and Python documentation
 
@@ -68,9 +70,23 @@ paper artifacts alongside it. Run it again to reuse cached observations;
 `--samples 5` changes the demo's configuration, `--only summary` selects a subset, and
 `--dry-run` explains required work without running it. `--render-only` regenerates
 outputs from saved sample selections without the benchmark repository.
-`--timeout 60` sets a per-command deadline in seconds. Increasing it reuses
-successful samples and retries timed-out work; `--force` also retries ordinary
-failures. Each attempt retains the deadline it actually used.
+Timeouts are disabled by default; `--timeout 60` opts into a per-command limit.
+Increasing it reuses successes and recollects timed-out treatments. Repeating
+the same deadline reuses timeout rows; ordinary error rows are reused until
+`--force` requests fresh collection.
+
+**Row invariant:** every requested treatment has rows in every table declared
+by `error_rows` before collection starts. The callback supplies rows for
+pending, timed-out, failed, and interrupted work; successful results replace
+the placeholders. Timeout and failure statuses remain distinct. Ctrl+C stops
+the whole evaluation, including parallel workers, while preserving those rows.
+
+Treatment timeouts and failures are ordinary data. Figures decide whether to
+emit `eval_live.warn(...)` or `eval_live.error(...)`. These messages are computed
+rendering outputs, never stored in the database. The CLI shows each unique
+message as it occurs, then summarizes all warnings followed by all errors.
+The webpage shows derived warning/error tables that update with filtering.
+Reporting errors fail the CLI after other outputs render; warnings do not.
 
 The [Python documentation](docs/index.rst) includes a tutorial, data and filter
 contracts, and API reference generated from docstrings. Build it locally with:

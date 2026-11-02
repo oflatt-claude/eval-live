@@ -13,7 +13,7 @@ import time
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
-from .store import Data, digest, parameters
+from .store import Data, digest, parameters, validate_tables
 
 
 @dataclass
@@ -45,17 +45,18 @@ class ProcessInterrupted(KeyboardInterrupt):
 
 
 def run_command(argv: Sequence[str | Path], *, cwd: str | Path | None = None,
-                timeout: float = 300, env: Mapping[str, str] | None = None,
+                timeout: float | None = None, env: Mapping[str, str] | None = None,
                 check: bool = True) -> ProcessResult:
     """Measure a command without a shell, capturing stdout, stderr, and status.
 
-    ``env`` augments the current environment. A timeout or interrupt terminates
-    the process group on POSIX, and the child on Windows. Nonzero exits and
+    ``timeout=None`` means no deadline. ``env`` augments the current environment.
+    A timeout or interrupt terminates the process group on POSIX, and the child
+    on Windows. Nonzero exits and
     timeouts raise ``ProcessError`` when ``check`` is true. Use
     ``RunContext.command`` to also persist this information automatically.
     """
-    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout must be positive")
+    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("timeout must be None or a finite positive number")
     args = tuple(os.fspath(value) for value in argv)
     if not args:
         raise ValueError("command must not be empty")
@@ -113,28 +114,38 @@ class Benchmark:
     per target/build identity. The resulting binary is ``context.binary`` in
     measurement callbacks. Use ``context.command`` to capture process details.
 
-    ``timeout`` is the per-command deadline in seconds, overridden by the CLI
-    ``--timeout`` option. Increasing it retries cached timeouts while preserving
+    Required ``error_rows(treatment, status)`` supplies named flat tables for
+    pending, timed-out, failed, or interrupted treatments. It must be pure;
+    all templates are validated before collection. Every declared table must
+    have rows in both these templates and the collector's successful result.
+
+    ``timeout`` is the optional per-command deadline in seconds (default None),
+    overridden by ``--timeout``. Increasing it recollects timeouts while preserving
     successful observations. It does not preempt arbitrary Python callbacks.
     """
 
     name: str
     run: Callable[[RunContext], Data]
     version: str
+    error_rows: Callable[[Mapping, str], Data]
     inputs: Sequence[str | Path] = ()
     dependencies: Sequence[Callable] = ()
     build: Callable[[RunContext], Path] | None = None
     build_config: Mapping = field(default_factory=dict)
     environment: Mapping[str, str] = field(default_factory=dict)
     tools: Mapping = field(default_factory=dict)
-    timeout: float = 300
+    timeout: float | None = None
 
     def __post_init__(self):
         if (not isinstance(self.name, str) or not self.name or not isinstance(self.version, str)
-                or not self.version or type(self.timeout) not in (int, float)
+                or not self.version):
+            raise ValueError("benchmark name and version are required")
+        if self.timeout is not None and (type(self.timeout) not in (int, float)
                 or not math.isfinite(self.timeout) or self.timeout <= 0):
-            raise ValueError("benchmark name/version and a positive timeout are required")
+            raise ValueError("timeout must be None or a finite positive number")
         parameters(self.build_config)
+        if not callable(self.error_rows):
+            raise ValueError("error_rows must be a function returning named flat tables")
         parameters(self.tools)
         if any(not isinstance(k, str) or not isinstance(v, str) for k, v in self.environment.items()):
             raise ValueError("environment keys and values must be strings")
@@ -149,9 +160,18 @@ class Benchmark:
     def identity(self) -> str:
         """Fingerprint measurement and declared helper code independently of plots."""
         return digest({"version": self.version, "run": callable_identity(self.run),
+                       "error_rows": callable_identity(self.error_rows),
                        "helpers": [callable_identity(fn) for fn in self.dependencies],
                        "build": callable_identity(self.build) if self.build else None,
                        "build_config": parameters(self.build_config)})
+
+    def fallback(self, config: Mapping, status: str) -> Data:
+        """Construct explicit rows for an unfinished or unsuccessful treatment."""
+        tables = self.error_rows(MappingProxyType(dict(config)), status)
+        validate_tables(tables, user=True)
+        if not tables or any(not rows for rows in tables.values()):
+            raise ValueError("error_rows must supply at least one row in every declared table")
+        return tables
 
 
 @dataclass
@@ -161,7 +181,7 @@ class RunContext:
     directory: Path
     config: Mapping
     commit: str
-    timeout: float
+    timeout: float | None
     environment: Mapping[str, str]
     binary: Path | None = None
     processes: list[ProcessResult] = field(default_factory=list)

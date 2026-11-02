@@ -6,8 +6,8 @@ definitions in the terminal, in paper artifacts, and in an interactive webpage.
 It plans benchmark execution from each artifact's data requirements, caches
 observations by commit and configuration, and records complete argument and
 sample provenance in one flat JSON data file. One ``Registry`` holds both
-benchmarks and outputs; its graph/table callbacks keep the original data
-dictionary interface.
+benchmarks and outputs; graph/table callbacks receive dictionaries of named
+tables.
 
 .. toctree::
    :maxdepth: 2

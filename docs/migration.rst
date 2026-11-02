@@ -4,11 +4,10 @@ Migrating existing Registry scripts
 Keep your registry, graph/table callbacks, and filters. The same ``Registry``
 now handles collection and caching. Existing ``css()``, ``js()``,
 ``pyodide_lib()``, terminal rendering, and ``render_to_dir`` remain available.
-There is no separate evaluation object or artifact class to construct.
 
 To adopt collection and caching:
 
-1. Register a callback with ``reg.benchmark(name, collect, version=..., ...)``.
+1. Register a collector with ``reg.benchmark(..., version=..., error_rows=...)``.
    It returns named flat tables. Split repeated samples and nested timing
    summaries into rows, and declare inputs, helper dependencies, tool versions,
    and measurement parameters.
@@ -31,8 +30,11 @@ For example, only registration and execution change for an existing callback:
    def summary(data):
        return [{"samples": len(data["measurements"])}]
 
+   def error_rows(treatment, status):
+       return {"measurements": [{"sample": treatment["sample"], "seconds": None, "status": status}]}
+
    reg = eval_live.Registry()
-   reg.benchmark("worker", collect, version="1", inputs=["worker.py"],
+   reg.benchmark("worker", collect, version="1", error_rows=error_rows, inputs=["worker.py"],
                  treatments=[{"sample": i} for i in range(args.samples)])
    reg.table("Summary", summary)
    reg.run(args=args, argv=tokens)
@@ -54,9 +56,8 @@ project-specific importer with complete provenance.
 For an egglog-style evaluator, keep engine commands and timing-summary parsing
 in benchmark callbacks. Replace pair-specific orchestration with named
 requirements, and normalize per-rule/per-phase details into additional tables
-linked by ``run_id``. The generic runner has no Rust-specific build logic or
-hard-coded treatment names. See ``demo/egglog_eval.py`` for a small real-engine
-adapter using the same API.
+linked by ``run_id``. See ``demo/egglog_eval.py`` for an adapter using one
+treatment list and one collector.
 
 .. code-block:: bash
 
@@ -65,11 +66,20 @@ adapter using the same API.
 ``--binary`` selects the executable; ``--repository`` and ``--commit`` select
 the ``.egg`` input files. The script declares a cross product of files, modes,
 and samples, then registers one collector that runs any of those treatments.
-``--modes`` selects off/proofs/proof-testing commands and normalizes schema-4 timing summaries into timing, phase, and
-ruleset tables. Repeating the command reuses exact observations; changing the
+``--modes`` selects off/proofs/proof-testing commands. The collector returns
+timing, phase, and ruleset tables from schema-4 timing summaries. Repeating the command reuses exact observations; changing the
 binary or workload content invalidates them.
 
-Outputs in both demos use decorator registration, such as ``@reg.table("Timings")``.
-The direct ``reg.table("Timings", timings)`` form is still supported. To allow
-concurrent collection, mark treatments with ``parallel=True`` and use ``--jobs``
-to cap workers. The demos expose this through ``--parallel --jobs 4``.
+Data-file compatibility
+-----------------------
+
+Earlier schema-1 files remain readable. Their attempts may lack
+``data_version`` or ``has_rows`` and may contain a legacy ``sample`` index.
+The loader preserves those rows and reconstructs named requirements from
+saved selections when necessary. It also accepts earlier cache keys that
+included the timeout. Adding an ``error_rows`` callback changes the collection
+identity, so adopting the row contract collects fresh observations.
+
+See :doc:`python-guide` for optional timeouts, parallel collection, and computed
+warnings/errors. No timeout is applied by default. Figure messages are
+computed during rendering and are never added to the saved measurements.

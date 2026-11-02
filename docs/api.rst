@@ -4,10 +4,8 @@ Python API reference
 Registry
 --------
 
-One registry holds benchmarks and outputs. Add ``requires=`` to the existing
-``graph`` and ``table`` methods to select treatments with Python functions.
-Without a selector an output uses the entire catalog. Callbacks continue to
-receive ordinary data dictionaries. ``macros`` adds LaTeX definitions.
+A ``Registry`` declares collection callbacks and paper outputs. See
+:doc:`python-guide` for examples and :doc:`data-format` for saved tables.
 
 .. autoclass:: eval_live.Registry
    :members:
@@ -16,12 +14,15 @@ receive ordinary data dictionaries. ``macros`` adds LaTeX definitions.
 
 .. autofunction:: eval_live.add_arguments
 
+.. autofunction:: eval_live.warn
+
+.. autofunction:: eval_live.error
+
 Benchmark callbacks
 -------------------
 
-``Registry.benchmark(name, fn, treatments=..., version=..., **options)`` accepts
-the collection options listed on ``Benchmark``. Scripts register directly on their registry; they do
-not need to construct benchmark objects separately.
+``Registry.benchmark`` accepts the configuration fields of ``Benchmark``.
+Collection callbacks receive a ``RunContext`` and return named flat tables.
 
 .. autoclass:: eval_live.Benchmark
    :members:
@@ -44,9 +45,6 @@ Plans, results, and storage
    :members:
 
 .. autoclass:: eval_live.EvaluationResult
-   :members:
-
-.. autoclass:: eval_live.CollectionError
    :members:
 
 .. autoclass:: eval_live.Store

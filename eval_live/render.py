@@ -7,6 +7,7 @@ import io
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Sequence
 
 from .eval_live import Registry, _Output
@@ -94,6 +95,8 @@ def render_outputs(data: dict, outputs: Sequence[_Output], output: str | Path, *
     for artifact in outputs:
         value = artifact.render(data)
         if artifact.kind == "graph":
+            if value is None:
+                continue
             import matplotlib.pyplot as plt
             buffer = io.BytesIO()
             try:
@@ -134,10 +137,27 @@ def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
     """Render selected registry outputs using the same callbacks in every format."""
     registry = Registry()
     registry._outputs = list(artifacts)
+    printed = set()
+
+    def message(level, text):
+        if (level, text) not in printed:
+            printed.add((level, text))
+            print(f"{level.upper()}: {text}", file=sys.stderr)
+
+    registry._message_handler = message
     bound = registry._bind(selections)
-    written = render_outputs(data, bound._outputs, output)
-    if artifacts:
-        bound.render_to_console(data)
-        written.append(write_html(output / "index.html", data, artifacts, selections,
-                                  source=source, title=title))
+    try:
+        written = render_outputs(data, bound._outputs, output)
+        if artifacts:
+            bound.render_to_console(data)
+            written.append(write_html(output / "index.html", data, artifacts, selections,
+                                      source=source, title=title))
+    finally:
+        for table in registry.run_messages():
+            if table["rows"]:
+                print(f"{table['name']}:", file=sys.stderr)
+                for row in table["rows"]:
+                    print(f"  {row['message']}", file=sys.stderr)
+    if registry.run_messages()[1]["rows"]:
+        raise RuntimeError("rendering reported errors")
     return written

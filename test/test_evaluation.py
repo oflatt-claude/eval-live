@@ -3,6 +3,8 @@
 Run: python -m unittest discover -s test -p 'test_evaluation.py'
 """
 import argparse
+from contextlib import redirect_stderr
+import io
 import json
 import os
 from pathlib import Path
@@ -20,6 +22,11 @@ from eval_live.store import atomic_write, digest, parameter_rows, read_parameter
 
 CALLS = []
 BUILDS = []
+
+
+def error_rows(treatment, status):
+    return {"measurements": [{"value": None, "factor": treatment.get("factor", 1),
+                               "sample": treatment.get("sample", 0), "status": status}]}
 
 
 def collect(context):
@@ -120,6 +127,37 @@ def empty_named_table(data):
     return [{"count": len(eval_live.select(data, "empty").get("measurements", []))}]
 
 
+def check_reserved(context):
+    saved = json.loads(Path(context.config["data"]).read_text())
+    assert len(saved["measurements"]) == 3
+    assert len(saved["eval_selections"]) == 3
+    assert {row["run_id"] for row in saved["measurements"]} == {row["run_id"] for row in saved["eval_runs"]}
+    if context.config["sample"] == 0:
+        assert [row["status"] for row in saved["measurements"]] == ["pending"] * 3
+    return {"measurements": [{"value": 1, "sample": context.config["sample"]}]}
+
+
+def empty_result(context):
+    return {}
+
+
+def report_messages(data):
+    eval_live.error("Results need review")
+    eval_live.warn("Some values are missing")
+    eval_live.warn("Some values are missing")
+    return table(data)
+
+
+def conditional_messages(data):
+    if data.get("problem"):
+        eval_live.warn("Some values are missing")
+    return []
+
+
+def broken_figure(data):
+    raise ValueError("invalid figure input")
+
+
 class EvaluationTests(unittest.TestCase):
     def setUp(self):
         CALLS.clear()
@@ -160,7 +198,7 @@ class EvaluationTests(unittest.TestCase):
         if registry is None:
             registry = eval_live.Registry(**kwargs)
             registry.table("values", table, requires=request or self.request())
-        options = vars(benchmark or eval_live.Benchmark("read", collect, "1", inputs=["value.txt"])).copy()
+        options = vars(benchmark or eval_live.Benchmark("read", collect, "1", inputs=["value.txt"], error_rows=error_rows)).copy()
         options["fn"] = options.pop("run")
         registry.benchmark(**options, treatments=self.treatments, repository=self.repo)
         return registry
@@ -179,7 +217,7 @@ class EvaluationTests(unittest.TestCase):
     def parallel_registry(self, treatments, callback=concurrent_collect, **options):
         reg = eval_live.Registry()
         reg.benchmark("read", callback, version="1", repository=self.repo,
-                      inputs=["value.txt"], treatments=treatments, **options)
+                      inputs=["value.txt"], treatments=treatments, error_rows=error_rows, **options)
         reg.table("Values", table)
         return reg
 
@@ -232,8 +270,7 @@ class EvaluationTests(unittest.TestCase):
     def test_parallel_timeout_retries_only_timed_out_treatments(self):
         reg = self.parallel_registry([{"parallel": True, "delayed": delayed} for delayed in (False, True)],
                                      callback=timed_collect)
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(reg, jobs=2, timeout=0.01)
+        self.run_eval(reg, jobs=2, timeout=0.01)
         result = self.run_eval(reg, jobs=2, timeout=5)
         self.assertEqual((result.collected, result.reused), (1, 1))
         self.assertEqual(len(self.stored()["eval_runs"]), 3)
@@ -245,11 +282,10 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(self.run_eval(reg, jobs=2).collected, 3)
         self.assertEqual(len(BUILDS), 1)
         reg = self.parallel_registry([{"parallel": True, "fail": fail} for fail in (True, False)], callback=collect)
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(reg, jobs=2)
+        self.run_eval(reg, jobs=2)
         self.assertEqual(self.stored()["eval_processes"][-1]["returncode"], 7)
         self.assertIn("diagnostic", self.stored()["eval_processes"][-1]["stdout"])
-        self.assertEqual(len(self.stored()["measurements"]), 4)
+        self.assertEqual(len(self.stored()["measurements"]), 5)
 
     @unittest.skipUnless(os.name == "posix", "POSIX signal and process-group behavior")
     def test_parallel_interrupt_stops_commands_and_checkpoints_attempts(self):
@@ -260,11 +296,11 @@ class EvaluationTests(unittest.TestCase):
         script.write_text(
             "import sys\n"
             f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
-            "import eval_live\nfrom test_evaluation import interrupted_collect, constant_table\n"
+            "import eval_live\nfrom test_evaluation import interrupted_collect, constant_table, error_rows\n"
             "if __name__ == '__main__':\n"
             "    reg = eval_live.Registry()\n"
-            f"    reg.benchmark('slow', interrupted_collect, version='1', repository={str(self.repo)!r}, "
-            f"treatments=[{{'case': str(i), 'parallel': True, 'pids': {str(pids)!r}}} for i in range(2)])\n"
+            f"    reg.benchmark('slow', interrupted_collect, version='1', error_rows=error_rows, repository={str(self.repo)!r}, "
+            f"treatments=[{{'case': str(i), 'parallel': True, 'pids': {str(pids)!r}}} for i in range(4)])\n"
             "    reg.table('Counts', constant_table)\n"
             f"    reg.run(args={{'output': {str(self.output)!r}, 'jobs': 2}})\n"
         )
@@ -282,7 +318,10 @@ class EvaluationTests(unittest.TestCase):
                     process.kill()
                     process.communicate()
         data = self.stored()
-        self.assertEqual([r["status"] for r in data["eval_runs"]], ["interrupted", "interrupted"])
+        self.assertEqual([r["status"] for r in data["eval_runs"]], ["interrupted"] * 4)
+        self.assertEqual(len(data["measurements"]), 4)
+        self.assertEqual({r["status"] for r in data["measurements"]}, {"interrupted"})
+        self.assertFalse((self.output / "index.html").exists())
         self.assertEqual([r["status"] for r in data["eval_processes"]], ["interrupted", "interrupted"])
         self.assertEqual(data["eval_invocations"][0]["status"], "interrupted")
         for path in pids.iterdir():
@@ -291,7 +330,7 @@ class EvaluationTests(unittest.TestCase):
 
     def test_decorator_registration_preserves_functions_and_direct_registration(self):
         reg = eval_live.Registry()
-        self.assertIs(reg.benchmark("read", version="1", repository=self.repo)(collect), collect)
+        self.assertIs(reg.benchmark("read", version="1", repository=self.repo, error_rows=error_rows)(collect), collect)
         self.assertIs(reg.table("Values")(table), table)
         self.assertIs(reg.graph("Figure")(figure), figure)
         self.assertIs(reg.macros("Numbers")(macros), macros)
@@ -299,6 +338,97 @@ class EvaluationTests(unittest.TestCase):
         result = self.run_eval(reg)
         self.assertEqual(result.collected, 1)
         self.assertEqual(len(reg._outputs), 4)
+
+    def test_all_rows_and_selections_exist_before_collection_starts(self):
+        reg = self.evaluation(self.request(samples=3, data=str(self.data)),
+                              benchmark=eval_live.Benchmark("read", check_reserved, "1", error_rows=error_rows))
+        self.assertEqual(self.run_eval(reg).collected, 3)
+        self.assertEqual(len(self.stored()["measurements"]), 3)
+        self.assertEqual({r["value"] for r in self.stored()["measurements"]}, {1})
+
+    def test_empty_results_use_error_rows_and_timeouts_are_disabled_by_default(self):
+        reg = self.evaluation(benchmark=eval_live.Benchmark("read", empty_result, "1", error_rows=error_rows))
+        captured = io.StringIO()
+        with redirect_stderr(captured):
+            result = self.run_eval(reg, render=True)
+        self.assertEqual(result.collected, 1)
+        self.assertEqual(self.stored()["measurements"][0]["status"], "failure")
+        self.assertIsNone(self.stored()["eval_runs"][0]["timeout"])
+        self.assertNotIn("WARNING:", captured.getvalue())
+        self.assertNotIn("ERROR:", captured.getvalue())
+        self.assertTrue((self.output / "values.tex").exists())
+        self.assertEqual(self.run_eval(reg).reused, 1)
+        self.assertEqual(eval_live.run_command([sys.executable, "-c", "print('unlimited')"]).stdout, "unlimited\n")
+
+    def test_removing_timeout_recollects_timeouts_and_reuses_successes(self):
+        reg = self.evaluation(self.request(after_first=True, samples=2),
+                              benchmark=eval_live.Benchmark("read", timed_collect, "1", error_rows=error_rows))
+        self.run_eval(reg, timeout=0.01)
+        result = self.run_eval(reg)
+        self.assertEqual((result.collected, result.reused), (1, 1))
+        self.assertEqual([r["status"] for r in self.stored()["eval_runs"]], ["success", "timed-out", "success"])
+        self.assertIsNone(self.stored()["eval_runs"][-1]["timeout"])
+
+    def test_error_rows_are_required_and_validated_before_writing(self):
+        reg = eval_live.Registry()
+        with self.assertRaises(TypeError):
+            reg.benchmark("read", collect, version="1")
+        for invalid_rows in ({}, {"measurements": []}, {"measurements": [{"value": [1]}]}):
+            def fallback(treatment, status):
+                return invalid_rows
+            candidate = self.evaluation(benchmark=eval_live.Benchmark("read", collect, "1", error_rows=fallback))
+            with self.assertRaises(ValueError):
+                self.run_eval(candidate)
+        self.assertFalse(self.data.exists())
+        self.assertEqual(CALLS, [])
+
+    def test_computed_messages_are_live_deduplicated_ordered_and_never_stored(self):
+        reg = eval_live.Registry()
+        reg.table("First", report_messages)
+        reg.table("Second", report_messages)
+        self.request()
+        evaluation = self.evaluation(registry=reg)
+        captured = io.StringIO()
+        with redirect_stderr(captured), self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
+            self.run_eval(evaluation, render=True)
+        output = captured.getvalue()
+        self.assertEqual(output.count("WARNING: Some values are missing"), 1)
+        self.assertEqual(output.count("ERROR: Results need review"), 1)
+        self.assertLess(output.index("ERROR:"), output.index("Warnings:"))
+        self.assertLess(output.index("Warnings:"), output.index("Errors:"))
+        self.assertEqual(output.count("Some values are missing"), 2)
+        self.assertEqual(output.count("Results need review"), 2)
+        self.assertNotIn("Some values are missing", self.data.read_text())
+        self.assertNotIn("Results need review", self.data.read_text())
+        self.assertTrue((self.output / "first.tex").exists())
+        self.assertTrue((self.output / "second.tex").exists())
+        saved_rows = self.stored()["measurements"]
+        with redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
+            self.run_eval(evaluation, render=True, render_only=True)
+        self.assertEqual(saved_rows, self.stored()["measurements"])
+        self.assertEqual(len(self.stored()["eval_runs"]), 1)
+
+    def test_browser_messages_recompute_and_do_not_mutate_supplied_data(self):
+        reg = eval_live.Registry()
+        reg.table("One", conditional_messages)
+        reg.table("Two", conditional_messages)
+        data = {"problem": True}
+        reg.run_tables(data)
+        self.assertEqual(reg.run_messages()[0]["rows"], [{"message": "Some values are missing"}])
+        self.assertEqual(data, {"problem": True})
+        reg.run_tables({})
+        self.assertEqual(reg.run_messages()[0]["rows"], [])
+
+    def test_figure_exceptions_report_errors_and_other_outputs_still_render(self):
+        reg = eval_live.Registry()
+        reg.table("Broken", broken_figure)
+        reg.table("Working", table)
+        self.request()
+        with redirect_stderr(io.StringIO()) as captured, self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
+            self.run_eval(self.evaluation(registry=reg), render=True)
+        self.assertIn("ERROR: Broken: invalid figure input", captured.getvalue())
+        self.assertTrue((self.output / "working.tex").exists())
+        self.assertEqual(len(self.stored()["measurements"]), 1)
 
     def test_cache_hits_do_not_collect_or_checkout(self):
         first = self.run_eval()
@@ -323,7 +453,7 @@ class EvaluationTests(unittest.TestCase):
     def test_no_selector_runs_entire_catalog_and_duplicates_share_work(self):
         reg = eval_live.Registry()
         reg.benchmark("read", collect, version="1", repository=self.repo,
-                      treatments=[{"suite": "a"}, {"suite": "b"}, {"suite": "a"}])
+                      treatments=[{"suite": "a"}, {"suite": "b"}, {"suite": "a"}], error_rows=error_rows)
         reg.table("All", table)
         reg.macros("Numbers", macros)
         result = self.run_eval(reg)
@@ -336,7 +466,7 @@ class EvaluationTests(unittest.TestCase):
         reg.benchmark("read", collect, version="1", repository=self.repo, treatments=[
             {"suite": suite, "size": size, "commit": "missing-ref" if suite == "c" else "HEAD"}
             for suite in ("a", "b", "c") for size in (10, 20)
-        ])
+        ], error_rows=error_rows)
 
         def needed(treatments):
             return (dict(t) for t in treatments if t["suite"] in {"a", "b"})
@@ -359,7 +489,7 @@ class EvaluationTests(unittest.TestCase):
         selectors = [mutate, lambda ts: [{**ts[0], "size": 99}], lambda ts: None]
         for selector in selectors:
             reg = eval_live.Registry()
-            reg.benchmark("read", collect, version="1", repository=self.repo, treatments=[{"size": 10}])
+            reg.benchmark("read", collect, version="1", repository=self.repo, treatments=[{"size": 10}], error_rows=error_rows)
             reg.table("Invalid", table, requires=selector)
             with self.assertRaisesRegex(ValueError, "invalid treatment selection for invalid/data"):
                 reg.plan(args={"output": self.output})
@@ -368,7 +498,7 @@ class EvaluationTests(unittest.TestCase):
 
     def test_empty_named_selection_replays_without_evaluating_selector(self):
         reg = eval_live.Registry()
-        reg.benchmark("read", collect, version="1", repository=self.repo)
+        reg.benchmark("read", collect, version="1", repository=self.repo, error_rows=error_rows)
         reg.table("Empty", empty_named_table, requires={"empty": lambda ts: []})
         result = self.run_eval(reg, render=True)
         self.assertEqual(result.collected, 0)
@@ -417,7 +547,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(CALLS), 4)
         external = self.root / "input.txt"
         external.write_text("first")
-        benchmark = eval_live.Benchmark("read", collect, "1", inputs=[external])
+        benchmark = eval_live.Benchmark("read", collect, "1", inputs=[external], error_rows=error_rows)
         self.run_eval(self.evaluation(benchmark=benchmark))
         external.write_text("second")
         self.run_eval(self.evaluation(benchmark=benchmark))
@@ -468,33 +598,29 @@ class EvaluationTests(unittest.TestCase):
         reg = eval_live.Registry()
         reg.table("broken", table, requires=self.request(fail=True, samples=3))
         reg.table("working", table, requires=self.request())
-        with self.assertRaises(eval_live.CollectionError) as caught:
-            self.run_eval(self.evaluation(registry=reg))
-        self.assertEqual(caught.exception.result.collected, 1)
+        result = self.run_eval(self.evaluation(registry=reg))
+        self.assertEqual(result.collected, 4)
         data = self.stored()
         self.assertEqual([row["status"] for row in data["eval_runs"]], ["failure", "failure", "failure", "success"])
         self.assertEqual(data["eval_processes"][0]["returncode"], 7)
         self.assertIn("diagnostic", data["eval_processes"][0]["stdout"])
-        self.assertEqual({row["artifact_id"] for row in data["eval_selections"]}, {"working"})
+        self.assertEqual({row["artifact_id"] for row in data["eval_selections"]}, {"broken", "working"})
         self.assertEqual(self.run_eval().reused, 1)
 
     def test_timeout_and_invalid_rows_are_recorded_as_failures(self):
-        benchmark = eval_live.Benchmark("read", slow, "1", timeout=0.02)
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(self.evaluation(benchmark=benchmark))
+        benchmark = eval_live.Benchmark("read", slow, "1", timeout=0.02, error_rows=error_rows)
+        self.run_eval(self.evaluation(benchmark=benchmark))
         self.assertEqual(self.stored()["eval_runs"][0]["status"], "timed-out")
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", invalid, "1")))
-        self.assertNotIn("measurements", self.stored())
+        self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", invalid, "1", error_rows=error_rows)))
+        self.assertTrue(all(row["value"] is None for row in self.stored()["measurements"]))
 
     def test_increasing_timeout_reuses_successes_and_retries_only_timeouts(self):
-        benchmark = eval_live.Benchmark("read", timed_collect, "1")
+        benchmark = eval_live.Benchmark("read", timed_collect, "1", error_rows=error_rows)
         reg = eval_live.Registry()
         reg.table("fast", table, requires=self.request())
         reg.table("slow", table, requires=self.request(delayed=True))
         evaluation = self.evaluation(registry=reg, benchmark=benchmark)
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(evaluation, timeout=0.01)
+        self.run_eval(evaluation, timeout=0.01)
         original = self.stored()["eval_runs"]
         self.assertEqual([row["status"] for row in original], ["success", "timed-out"])
         result = self.run_eval(evaluation, timeout=5)
@@ -510,42 +636,37 @@ class EvaluationTests(unittest.TestCase):
         reg.table("fast", table, requires=self.request())
         reg.table("slow", table, requires=self.request(delayed=True))
         evaluation = self.evaluation(registry=reg,
-                                     benchmark=eval_live.Benchmark("read", timed_collect, "1", timeout=10))
+                                     benchmark=eval_live.Benchmark("read", timed_collect, "1", timeout=10, error_rows=error_rows))
         result = self.run_eval(evaluation)
         self.assertEqual((result.reused, result.collected), (2, 0))
 
     def test_cached_timeout_blocks_equal_or_smaller_deadlines_and_force_overrides(self):
         evaluation = self.evaluation(self.request(delayed=True),
-                                     benchmark=eval_live.Benchmark("read", timed_collect, "1", timeout=0.01))
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(evaluation)
+                                     benchmark=eval_live.Benchmark("read", timed_collect, "1", timeout=0.01, error_rows=error_rows))
+        self.run_eval(evaluation)
         for deadline in (0.01, 0.005):
-            with self.assertRaisesRegex(eval_live.CollectionError, "cached timed-out"):
-                self.run_eval(evaluation, timeout=deadline)
+            self.run_eval(evaluation, timeout=deadline)
         self.assertEqual(len(CALLS), 1)
         plan = self.run_eval(evaluation, timeout=0.01, dry_run=True).plan
         self.assertEqual(plan.missing, 0)
-        self.assertIn("blocked by cached timed-out", plan.describe())
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(evaluation, timeout=0.01, force=True)
+        self.assertEqual(plan.reused, 1)
+        self.run_eval(evaluation, timeout=0.01, force=True)
         self.assertEqual(len(CALLS), 2)
 
     def test_timeout_retry_collects_only_failed_treatments(self):
         evaluation = self.evaluation(self.request(after_first=True, samples=3),
-                                     benchmark=eval_live.Benchmark("read", timed_collect, "1"))
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(evaluation, timeout=0.01)
+                                     benchmark=eval_live.Benchmark("read", timed_collect, "1", error_rows=error_rows))
+        self.run_eval(evaluation, timeout=0.01)
         result = self.run_eval(evaluation, timeout=5)
         self.assertEqual((result.reused, result.collected), (1, 2))
         self.assertEqual([sample for _, _, sample in CALLS], [0, 1, 2, 1, 2])
-        self.assertEqual(len(self.stored()["eval_selections"]), 3)
+        self.assertEqual(len(self.stored()["eval_selections"]), 6)
 
     def test_raising_timeout_can_reuse_older_successes_without_retrying(self):
         evaluation = self.evaluation(self.request(delayed=True, samples=2),
-                                     benchmark=eval_live.Benchmark("read", timed_collect, "1"))
+                                     benchmark=eval_live.Benchmark("read", timed_collect, "1", error_rows=error_rows))
         original = self.run_eval(evaluation, timeout=5)
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(evaluation, timeout=0.01, force=True)
+        self.run_eval(evaluation, timeout=0.01, force=True)
         result = self.run_eval(evaluation, timeout=5)
         self.assertEqual((result.reused, result.collected), (2, 0))
         self.assertEqual(len(CALLS), 4)
@@ -557,13 +678,10 @@ class EvaluationTests(unittest.TestCase):
 
     def test_increased_timeout_does_not_retry_ordinary_failures(self):
         evaluation = self.evaluation(self.request(fail=True))
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(evaluation)
-        with self.assertRaisesRegex(eval_live.CollectionError, "cached failure"):
-            self.run_eval(evaluation, timeout=600)
+        self.run_eval(evaluation)
+        self.run_eval(evaluation, timeout=600)
         self.assertEqual(len(CALLS), 1)
-        with self.assertRaises(eval_live.CollectionError):
-            self.run_eval(evaluation, timeout=600, force=True)
+        self.run_eval(evaluation, timeout=600, force=True)
         self.assertEqual(len(CALLS), 2)
 
     def test_legacy_timeout_keys_are_reused_without_rewriting_observations(self):
@@ -600,14 +718,13 @@ class EvaluationTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_mutating_materialized_inputs_cannot_produce_a_cache_hit(self):
-        benchmark = eval_live.Benchmark("read", mutate_input, "1", inputs=["value.txt"])
-        with self.assertRaisesRegex(eval_live.CollectionError, "inputs changed"):
-            self.run_eval(self.evaluation(benchmark=benchmark))
-        self.assertNotIn("measurements", self.stored())
+        benchmark = eval_live.Benchmark("read", mutate_input, "1", inputs=["value.txt"], error_rows=error_rows)
+        self.run_eval(self.evaluation(benchmark=benchmark))
+        self.assertTrue(all(row["value"] is None for row in self.stored()["measurements"]))
         self.assertEqual(self.stored()["eval_runs"][0]["status"], "failure")
 
     def test_build_shared_across_configs_and_skipped_for_cache_hits(self):
-        benchmark = eval_live.Benchmark("read", use_binary, "1", build=build, inputs=["value.txt"])
+        benchmark = eval_live.Benchmark("read", use_binary, "1", build=build, inputs=["value.txt"], error_rows=error_rows)
         requests = [self.request(value=1, samples=2), self.request(value=2)]
         reg = eval_live.Registry()
         reg.table("values", table, requires=lambda ts: [t for select in requests for t in select(ts)])
@@ -655,7 +772,7 @@ class EvaluationTests(unittest.TestCase):
 
     def test_interrupt_records_process_and_attempt(self):
         outcome = ProcessResult(("worker",), str(self.repo), 0.1, -9, "partial stdout", "", "interrupted")
-        benchmark = eval_live.Benchmark("read", slow, "1")
+        benchmark = eval_live.Benchmark("read", slow, "1", error_rows=error_rows)
         with patch("eval_live.benchmarks.run_command", side_effect=ProcessInterrupted(outcome)):
             with self.assertRaises(KeyboardInterrupt):
                 self.run_eval(self.evaluation(benchmark=benchmark))
@@ -666,10 +783,10 @@ class EvaluationTests(unittest.TestCase):
 
     def test_protocol_version_and_helper_code_invalidate_cache(self):
         self.run_eval()
-        result = self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", collect, "2", inputs=["value.txt"])))
+        result = self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", collect, "2", inputs=["value.txt"], error_rows=error_rows)))
         self.assertEqual(result.collected, 1)
         self.assertEqual([row["data_version"] for row in self.stored()["eval_runs"]], ["1", "2"])
-        result = self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", collect, "2", inputs=["value.txt"], dependencies=[table])))
+        result = self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", collect, "2", inputs=["value.txt"], dependencies=[table], error_rows=error_rows)))
         self.assertEqual(result.collected, 1)
 
     def test_exports_share_samples_and_write_only_one_json_data_file(self):
@@ -696,7 +813,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(plan.missing, 1)
         self.assertFalse(self.output.exists())
         with self.assertRaisesRegex(ValueError, "duplicate benchmark"):
-            reg.benchmark("read", collect, version="1")
+            reg.benchmark("read", collect, version="1", error_rows=error_rows)
         with self.assertRaisesRegex(ValueError, "filename-safe"):
             reg.table("invalid", table, id="../escape")
         with self.assertRaisesRegex(ValueError, "selector"):
@@ -722,7 +839,7 @@ class RegistryTests(unittest.TestCase):
         with patch.dict(sys.modules, {module.__name__: module}):
             exec(eval_live.pyodide_lib(), module.__dict__)
             reg = module.Registry()
-            reg.benchmark("worker", collect, version="1")
+            reg.benchmark("worker", collect, version="1", error_rows=error_rows)
             reg.table("Values", table, requires=lambda treatments: treatments)
             self.assertEqual(reg.run_tables({"measurements": [{"value": 7}]})[0]["rows"],
                              [{"value": 7, "sample": 0}])

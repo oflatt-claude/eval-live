@@ -15,7 +15,8 @@ Table                   Contents
 ======================= ======================================================
 ``eval_metadata``       Singleton schema and writer versions.
 ``eval_invocations``    Invocation identity, timestamps/status, script identity,
-                        script Git revision/dirty state, Python/platform, cwd.
+                        script Git revision/dirty state, Python/platform, cwd,
+                        and whether collection completed.
 ``eval_argv``           Invocation ID, original token position and token.
 ``eval_arguments``      All resolved invocation options, with scalar types and
                         list positions, including defaults and empty lists.
@@ -24,7 +25,8 @@ Table                   Contents
 ``eval_environments``   Environment ID and named platform/Python/tool settings.
 ``eval_runs``           Attempt ID, collecting invocation, benchmark, resolved
                         commit/ref, cache identity, configuration/environment,
-                        data version, status, timing, binary hash, and error.
+                        data version, status, timing, binary hash, error, and
+                        ``has_rows`` for attempts with declared result rows.
 ``eval_inputs``         Run ID, declared input path and SHA-256.
 ``eval_selections``     Rendering invocation, artifact, named requirement,
                         position, and selected run ID (fresh or reused).
@@ -40,40 +42,39 @@ kinds. Each value has an explicit type, so ``1``, ``1.0``, ``"1"``, and
 ``true`` remain distinct. List items have ordered indices. Empty lists/maps
 use a marker row with index -1 and null value. Paths in CLI arguments normalize
 to strings. A configuration's three scopes are ``request``, ``arguments``, and
-``build``. No scope is hidden in a JSON-valued cell.
+``build``.
 
-An observation's collecting invocation and a figure's rendering invocation may
-be different: ``eval_selections`` records the exact reusable observations used.
-Force runs retain previous attempts and selections. Failed/timed-out attempts
-never satisfy a treatment's data requirement. A run left in ``running``
-state by a stopped process becomes ``interrupted`` when the next writer starts.
+Rows and selections
+-------------------
 
-The full treatment and CLI measurement parameters form the configuration key,
-including the treatment's ``parallel`` flag (when supplied) and resolved
-``jobs`` worker limit. Parallel workers never write this file; the parent
-checkpoints each completed attempt.
-Repetitions are user-defined fields such as ``sample``; a CLI sample count is
-also part of the configuration by default. There is no library sample counter.
-Each attempt has a ``run_id`` linking its table rows to configuration and
-commit provenance. Additional row keys such as phase belong to the paper's
-table definitions; derived outputs can group rows and compute statistics.
+``run_id`` links measurement rows to a treatment's configuration and commit.
+``eval_selections`` records the exact attempts used by each output, including
+reused results. Repeated or forced evaluations retain earlier attempts.
 
-``eval_runs.data_version`` records the collecting benchmark's declared
-``version``. The version participates in the runner fingerprint: changing it
-produces a new cache identity without deleting earlier data. It describes the
-tables' format/meaning, independently of this JSON container schema version.
-Earlier schema-1 observations may lack this field and retain their historical
-``sample`` attempt index. They are not relabeled. The loader reconstructs
-``eval_requirements`` from earlier nonempty selections when that table is absent.
+Every requested treatment has rows in every table declared by ``error_rows``
+before collection begins. ``has_rows=True`` identifies attempts covered by
+this invariant. ``eval_runs.status`` is one of ``pending``, ``running``,
+``success``, ``timed-out``, ``failure``, or ``interrupted``. Error rows satisfy
+output requirements just as measured rows do. Unfinished attempts from a
+stopped writer become ``interrupted`` when the next writer starts.
 
-``eval_runs.timeout`` is the per-command deadline used for that attempt. It
-does not participate in cache identity: raising the deadline preserves successes
-and permits retries of timed-out work. Equal/smaller deadlines keep cached
-timeouts blocking; ordinary failures require ``--force``. For a smaller limit,
-a success is reused only if its recorded ``seconds`` fits; this total attempt
-duration includes setup/build work. Prior observations are never relabeled
-with a later deadline. Early schema-1 files whose cache keys included timeout
-remain readable and reusable without rewriting their observations.
+``eval_runs.data_version`` is the benchmark's declared table/protocol version.
+Changing it creates a new cache identity; saved attempts keep their version.
+It is independent of the file's ``schema_version``.
+
+``eval_runs.timeout`` is the per-command deadline in seconds, or null for no
+limit. ``seconds`` is elapsed attempt time, including preparation and builds.
+Each attempt keeps the deadline it used. The :doc:`python-guide` describes
+cache reuse when the deadline changes.
+
+``eval_invocations.collection_complete`` records that all requested treatments
+finished, including those represented by timeout or failure rows. Rendering
+may still report errors. Render-only mode defaults to the latest invocation
+with completed collection and uses its saved selections.
+
+Computed warning/error tables are rendering outputs and are never added to
+this file. Execution diagnostics in ``eval_runs`` and ``eval_processes`` are
+stored facts that figures can use when computing those messages.
 
 Persistence
 -----------
@@ -85,14 +86,10 @@ The current repository identity is the canonical common Git-directory path,
 so another clone has a separate collection identity. Stored selections remain
 portable for render-only use.
 
-Writes use a temporary sibling, flush/fsync, and atomic replacement after each
-completed observation and important status change. A single writer holds an OS
-lock on ``results.json.lock``. The lock file can remain after exit; the OS lock
-is released when the process stops. Concurrent writers fail immediately.
-Readers see a complete previous or new snapshot. Build/worktree directories
-and temporary files are disposable operational state, not additional stores.
+Writes are atomic: readers see the complete previous or new snapshot. One
+writer holds ``results.json.lock``; concurrent writers fail immediately. The
+lock file can remain after exit, but the lock is released when the writer
+stops. Benchmark results are stored only in the JSON file.
 
-This format favors small to medium paper evaluations. Each checkpoint rewrites
-the JSON snapshot; database/streaming backends and parallel measurements are
-not part of this version. Keep private inputs or process output out of shared
-reports: the HTML contains the saved tables, including recorded diagnostics.
+The generated HTML includes the saved tables and command diagnostics. See
+:doc:`migration` for compatibility with earlier data files.

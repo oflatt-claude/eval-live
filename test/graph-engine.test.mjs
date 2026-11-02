@@ -36,6 +36,10 @@ const pyodide = {
   runPython() {},
   async runPythonAsync(source) {
     const data = globals.get("__eval_live_data__");
+    if (source.includes(".run_messages(")) {
+      return proxy([{ name: "Warnings", rows: [{ message: "Some treatments timed out" }],
+                      has_filter_source: false, caption: null }]);
+    }
     if (source.includes(".run_tables(")) {
       return proxy([{ name: "Summary", rows: data.samples.map((row) => ({
                         ...row, styled: { text: row.id, style: { bold: true } },
@@ -75,6 +79,9 @@ assert.equal(state.engine.computedTables[0].caption, "Sample IDs");
 assert.equal(JSON.stringify(state.engine.computedTables[0].rows.map((row) => row.id)), '["one","two"]');
 assert.equal(state.engine.computedTables[0].rows[0].styled.text, "one");
 assert.equal(state.engine.computedTables[0].rows[0].styled.style.bold, true);
+await until(() => state.engine.messages.length === 1);
+assert.equal(state.engine.messages[0].rows[0].message, "Some treatments timed out");
+assert.equal(state.data.Warnings, undefined);
 console.log("  ok  graph and table results work with explicit dictionary conversion");
 
 ctx.ensureTableUi(state, "Summary", "computed").sql = "one";

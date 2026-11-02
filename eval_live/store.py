@@ -233,10 +233,15 @@ class Store:
                 if table not in SYSTEM_TABLES and "run_id" not in row:
                     raise ValueError(f"missing run_id in {table}")
         run_keys = {}
+        represented_runs = {row["run_id"] for name, rows in self.data.items()
+                            if not name.startswith("eval_") for row in rows}
         for row in self.data["eval_runs"]:
+            if "has_rows" in row and (type(row["has_rows"]) is not bool or
+                    (row["has_rows"] and row["run_id"] not in represented_runs)):
+                raise ValueError("attempt is missing its declared result rows")
             if row["config_id"] not in configs or row["environment_id"] not in environments:
                 raise ValueError("run has no configuration or environment")
-            if row["status"] not in ("running", "success", "failure", "timed-out", "interrupted"):
+            if row["status"] not in ("pending", "running", "success", "failure", "timed-out", "interrupted"):
                 raise ValueError("invalid run status")
             if "sample" in row and (type(row["sample"]) is not int or row["sample"] < 0):
                 raise ValueError("invalid legacy sample index")
@@ -251,7 +256,7 @@ class Store:
             for key in ("benchmark", "repository", "runner_id", "requested_ref"):
                 if not isinstance(row[key], str) or not row[key]:
                     raise ValueError(f"invalid run {key}")
-            if type(row["timeout"]) not in (int, float) or row["timeout"] <= 0:
+            if row["timeout"] is not None and (type(row["timeout"]) not in (int, float) or row["timeout"] <= 0):
                 raise ValueError("invalid run timeout")
             if row["status"] == "success" and (type(row["seconds"]) not in (int, float) or row["seconds"] < 0):
                 raise ValueError("successful run must have a duration")
@@ -276,8 +281,8 @@ class Store:
             if tuple(row[key] for key in requirement_keys) not in requirements:
                 raise ValueError("selection has no output requirement")
             run = run_by_id[row["run_id"]]
-            if run["status"] != "success":
-                raise ValueError("selection refers to an unsuccessful sample")
+            if run["status"] != "success" and not run.get("has_rows", False):
+                raise ValueError("selection refers to an attempt without result rows")
             for key in ("artifact_id", "requirement"):
                 if not isinstance(row[key], str) or not row[key]:
                     raise ValueError("invalid artifact selection")
@@ -343,9 +348,9 @@ class Store:
     def cached(self, cache_key: str, *, timeout: float | None = None) -> list[dict]:
         """Return applicable cached observations in persistent attempt order.
 
-        Without a deadline, return successes only. With ``timeout``, also
-        retain ordinary failures and timeouts at an equal or larger recorded
-        deadline: they block collection until forced or the bound increases.
+        ``timeout=None`` means no deadline. Ordinary failures remain reusable
+        until forced. Timeout rows are reusable at equal or smaller deadlines;
+        a larger deadline permits fresh collection.
         A success fits an equal/longer deadline, or a shorter one if its total
         recorded attempt duration fits. Running/interrupted attempts never block.
         The newest applicable row determines reuse or retry for a treatment.
@@ -355,9 +360,9 @@ class Store:
             if not row["cacheable"]:
                 continue
             if row["status"] == "success":
-                if timeout is None or row["timeout"] <= timeout or row["seconds"] <= timeout:
+                if timeout is None or (row["timeout"] is not None and row["timeout"] <= timeout) or row["seconds"] <= timeout:
                     eligible.append(row)
-            elif timeout is not None and (row["status"] == "failure" or
-                    (row["status"] == "timed-out" and timeout <= row["timeout"])):
+            elif row["status"] == "failure" or (row["status"] == "timed-out" and timeout is not None
+                    and row["timeout"] is not None and timeout <= row["timeout"]):
                 eligible.append(row)
         return eligible

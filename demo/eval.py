@@ -26,19 +26,25 @@ def summary(data):
     """Compute medians from flat observations, including empty filtered data."""
     groups = defaultdict(list)
     for row in data["measurements"]:
-        groups[row["algorithm"], row["size"]].append(row["seconds"])
-    return [
-        {"algorithm": algorithm, "size": size, "samples": len(times),
-         "median_ms": round(median(times) * 1000, 6)}
-        for (algorithm, size), times in sorted(groups.items())
-    ]
+        groups[row["algorithm"], row["size"]].append(row)
+    if any(row["status"] == "timed-out" for row in data["measurements"]):
+        eval_live.warn("Some membership treatments timed out; medians use completed measurements.")
+    if any(row["status"] == "failure" for row in data["measurements"]):
+        eval_live.error("Some membership treatments failed; inspect their saved process diagnostics.")
+    result = []
+    for (algorithm, size), rows in sorted(groups.items()):
+        times = [row["seconds"] for row in rows if row["status"] == "success"]
+        result.append({"algorithm": algorithm, "size": size, "samples": len(rows),
+                       "completed": len(times), "timeouts": sum(row["status"] == "timed-out" for row in rows),
+                       "median_ms": round(median(times) * 1000, 6) if times else None})
+    return result
 
 
 @reg.graph("Runtime", requires={"current": current})
 def runtime(data):
     import matplotlib.pyplot as plt
 
-    rows = summary(data)
+    rows = [row for row in summary(data) if row["median_ms"] is not None]
     fig, ax = plt.subplots(figsize=(6, 3.5))
     for algorithm in sorted({row["algorithm"] for row in rows}):
         selected = [row for row in rows if row["algorithm"] == algorithm]
@@ -64,7 +70,7 @@ def history(data):
     fig, ax = plt.subplots(figsize=(6, 3.5))
     for name in ("baseline", "candidate"):
         selected = eval_live.select(data, name)
-        rows = summary(selected)
+        rows = [row for row in summary(selected) if row["median_ms"] is not None]
         if rows:
             commit = selected["eval_runs"][0]["commit"][:8]
             ax.plot([r["size"] for r in rows], [r["median_ms"] for r in rows],
@@ -84,7 +90,13 @@ def numbers(data):
     rows = summary(data)
     return {"EvalSamples": len(data["measurements"]),
             "EvalInputSizes": len({row["size"] for row in rows}),
-            "EvalBestMedianMs": min((row["median_ms"] for row in rows), default=0)}
+            "EvalBestMedianMs": min((row["median_ms"] for row in rows if row["median_ms"] is not None), default=0)}
+
+
+def error_rows(treatment, status):
+    return {"measurements": [{"size": treatment["size"], "algorithm": treatment["algorithm"],
+                              "seed": treatment["seed"] + treatment["sample"], "sample": treatment["sample"],
+                              "queries": 200, "found": None, "seconds": None, "status": status}]}
 
 
 def membership(context):
@@ -96,7 +108,7 @@ def membership(context):
         sys.executable, "membership.py", str(context.config["size"]),
         context.config["algorithm"], str(context.config["seed"] + context.config["sample"]),
     ])
-    return {"measurements": [{**json.loads(result.stdout), "sample": context.config["sample"]}]}
+    return {"measurements": [{**json.loads(result.stdout), "sample": context.config["sample"], "status": "success"}]}
 
 
 def main(argv=None):
@@ -133,7 +145,7 @@ def main(argv=None):
         for algorithm in ("list", "set")
         for sample in range(args.samples)
     ]
-    reg.benchmark("membership", membership, version="3", inputs=["membership.py", "container.py"],
+    reg.benchmark("membership", membership, version="4", error_rows=error_rows, inputs=["membership.py", "container.py"],
                   treatments=treatments, repository=args.repository)
     try:
         result = reg.run(args=args, argv=tokens)

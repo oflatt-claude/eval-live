@@ -52,6 +52,7 @@ function makeState(data, projectName, graphScript, evalLivePy) {
       //   views actually DISPLAY, so one computed filter narrows them all.
       computedUnfiltered: [], // [{name, rows, hasFilterSource}]
       computedTables: [],     // [{name, rows, hasFilterSource}]
+      messages: [],           // derived warnings/errors; never part of raw data
       narrowing: null,        // {tableName: rows[]} from computed->raw feedback, or null
     },
   };

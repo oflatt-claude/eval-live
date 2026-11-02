@@ -12,7 +12,7 @@ tables, and macros. ``demo/eval.py`` is a complete single-script example:
    python demo/eval.py --dry-run               # inspect selected treatments
    python demo/eval.py --only summary --sizes 500
    python demo/eval.py --samples 5             # a new CLI configuration
-   python demo/eval.py --timeout 60            # retry eligible timeouts
+   python demo/eval.py --timeout 60            # opt into a 60-second command limit
    python demo/eval.py --render-only           # regenerate from saved selections
 
 The demo creates a tiny local Git repository with two commits. No clone or
@@ -39,9 +39,13 @@ Each selected treatment invokes the registered callback once:
        ])
        return {"measurements": [json.loads(result.stdout)]}
 
+   def error_rows(treatment, status):
+       return {"measurements": [{"suite": treatment["suite"], "size": treatment["size"],
+                                 "seconds": None, "status": status}]}
+
    reg = eval_live.Registry()
    reg.benchmark(
-       "worker", collect, version="1", inputs=["worker.py"],
+       "worker", collect, version="1", error_rows=error_rows, inputs=["worker.py"],
        treatments=[{"suite": suite, "size": size}
                    for suite in ("a", "b") for size in (100, 1000)],
    )
@@ -81,7 +85,7 @@ An output's ``requires(treatments)`` function returns the treatments it needs.
 It receives all registered treatments as read-only dictionaries. Return
 members of that catalog, or equivalent copies; invented configurations are
 rejected. Lists, generators, comprehensions, and reusable functions all work.
-Omitting ``requires`` selects the whole catalog. No selection DSL is needed.
+Omitting ``requires`` selects the whole catalog.
 
 .. doctest::
 
@@ -104,12 +108,10 @@ and deduplicated before collection. Overlapping selections and equivalent
 treatments share one cached observation. An explicit empty selection requires
 no collection and remains replayable later.
 
-Callbacks keep the original Registry interface: ordinary dictionaries of
-named tables. During ``reg.run`` they contain precisely the observations
-selected for that output. ``eval_runs`` and ``eval_configs`` provide provenance.
-``eval_requirements`` names its requirements, including empty ones, while
-``eval_selections`` links names to run IDs. Rows are copied so callbacks cannot
-change the saved snapshot.
+Callbacks receive dictionaries of named tables containing the observations
+selected for that output. Use ``eval_runs`` and ``eval_configs`` for provenance;
+the :doc:`data-format` reference describes their fields. Callback inputs are
+copies, so changing them does not change the saved data.
 
 For comparisons, name selector functions and use ``select(data, name)``:
 
@@ -134,7 +136,7 @@ For comparisons, name selector functions and use ``select(data, name)``:
 Use ``@reg.graph(...)``, ``@reg.table(...)``, ``@reg.macros(...)``, or
 ``@reg.benchmark(...)`` to register a function where it is defined. Decorators
 return the original function, so callbacks can still call each other. The
-existing ``reg.table(name, function)`` form remains supported; it is useful
+direct ``reg.table(name, function)`` form is useful
 when treatments depend on CLI arguments parsed in ``main``.
 
 Graphs return matplotlib Figures; tables return lists of row dictionaries,
@@ -153,13 +155,12 @@ Repetitions are ordinary treatments. The script owns its repetition option:
    parser = eval_live.add_arguments(argparse.ArgumentParser())
    parser.add_argument("--samples", type=int, default=5)
    args = parser.parse_args(tokens)
-   reg.benchmark("solver", run_solver, version="1", treatments=[
+   reg.benchmark("solver", run_solver, version="1", error_rows=error_rows, treatments=[
        {"suite": suite, "sample": i}
        for suite in suites for i in range(args.samples)
    ])
 
-There is no library sample counter or statistics API. ``sample`` is just a
-user-defined treatment field. A callback can compute means, medians, or any
+``sample`` is a user-defined treatment field. A callback can compute means, medians, or any
 other aggregate across the selected rows using ordinary Python.
 
 All measurement-affecting CLI options participate in cache identity by default,
@@ -176,8 +177,7 @@ keeps the total sample count in the configuration key.
 
 The cache also includes repository/full commit, collection and declared helper
 code, declared data version, input hashes, and relevant environment/tool
-settings. Equivalent treatments deduplicate even when returned by different
-selectors. Plot code and selectors do not affect measurement identity.
+settings. Plot code and selectors do not affect measurement identity.
 
 A treatment plus CLI configuration and commit identifies what to collect. A
 table that stores multiple rows for that treatment may additionally distinguish
@@ -205,7 +205,7 @@ that can safely run together:
 .. code-block:: python
 
    treatments = [{"suite": suite, "parallel": True} for suite in suites]
-   reg.benchmark("solver", run_solver, version="1", treatments=treatments)
+   reg.benchmark("solver", run_solver, version="1", error_rows=error_rows, treatments=treatments)
 
 Marked treatments run in separate Python processes, using at most ``--jobs N``
 workers (default: ``os.cpu_count()`` or 1). This supports CPU-bound Python as
@@ -219,10 +219,8 @@ gets its own temporary worktree. Build outputs are shared and should be treated
 as read-only; absolute external paths and ``WORKTREE`` files remain shared.
 Only mark treatments whose shared resources allow concurrent use.
 
-The flag and resolved worker limit are saved with the configuration and affect
-cache identity, since concurrency can affect measurements. Workers return data
-to the parent, which checkpoints completed attempts to the single JSON file.
-Timeout retries and failure caching work the same way as sequential collection.
+Concurrency can affect measurements, so the flag and resolved worker limit
+are saved with the configuration and affect cache identity.
 
 Both demos expose ``--parallel`` to mark their treatment lists. For example:
 
@@ -230,38 +228,109 @@ Both demos expose ``--parallel`` to mark their treatment lists. For example:
 
    python demo/eval.py --parallel --jobs 4
 
-Timeouts, failures, and replay
-------------------------------
+Complete rows, timeouts, and errors
+-----------------------------------
 
-``timeout=60`` on a benchmark sets a deadline per command; ``--timeout`` overrides
-it. Timeouts terminate the process group on POSIX and preserve captured output.
-Arbitrary Python callbacks are not preempted; use ``context.command`` for work
-that needs a deadline. Collection checkpoints every attempt and continues
-independent treatments after failures.
+**Invariant: every requested treatment has rows in every table declared by
+``error_rows`` before collection begins.** A timeout, failure, or stopped run
+never silently removes a treatment from the database or a figure's input.
 
-Timeout is a retry bound, separate from measurement identity. Increasing it
-preserves successes and permits retries of timed-out treatments. An equal or
-smaller limit leaves cached timeouts blocked. Ordinary failures require
-``--force``. The newest applicable attempt determines reuse; older successes
-can be reused when a more recent timeout becomes inapplicable. A shorter
-limit accepts a success only if its saved total duration fits (conservatively
-including setup/build time). Each attempt keeps its original deadline.
+Register ``error_rows(treatment, status)`` alongside the collector. It is a pure
+function returning named flat tables, with at least one row in each table. It
+receives the same configuration fields as ``context.config``. The library
+validates its rows for all statuses before any collection or database writes:
 
-``--force`` collects fresh observations while retaining history. Incomplete
-collection raises ``CollectionError`` after saving failures and rendering
-independent outputs. Interrupted attempts can be retried.
+.. code-block:: python
 
-``--render-only`` uses the latest successful invocation, or ``--invocation ID``.
-It replays saved selections, including empty requirements, without evaluating
+   def error_rows(treatment, status):
+       return {"measurements": [{"suite": treatment["suite"],
+                                 "seconds": None, "status": status}]}
+
+   reg.benchmark("solver", collect, version="1", error_rows=error_rows,
+                 treatments=[{"suite": "a"}, {"suite": "b"}])
+
+The statuses are ``pending``, ``timed-out``, ``failure``, and ``interrupted``.
+Use explicit status values and null measurements; a timeout and an execution
+error mean different things. Successful collectors return their ordinary rows,
+usually with ``status="success"``. They must include rows in every declared
+table. Additional per-phase or per-rule rows belong to the collector.
+
+Successful measurements replace pending rows; timeouts and failures replace
+them with the corresponding error rows.
+``error_rows`` must declare the same tables for every status. Empty or invalid
+collector results become failure rows. Changing ``error_rows`` affects cache
+identity, just like changing collection code.
+
+Timeouts are **disabled by default**. Opt in with ``--timeout SECONDS`` or
+``timeout=SECONDS`` on the benchmark. The deadline applies separately to each
+``context.command`` call, including build commands. On POSIX a timeout kills
+the subprocess group. Arbitrary Python callbacks are not preempted. Captured
+stdout, stderr, and execution status remain available with each attempt.
+
+Repeating the same deadline reuses timeout rows. Increasing it, or returning
+to an unlimited deadline, recollects timed-out treatments and preserves
+successes. Ordinary failures reuse their error rows until ``--force`` requests
+fresh collection. Timeouts and failures do not automatically produce warnings,
+reporting errors, or a failing CLI exit status.
+
+Ctrl+C stops the whole evaluation: active workers and their commands are
+cancelled on POSIX, queued treatments do not start, and figure generation is
+skipped. Completed rows remain saved; unfinished treatments keep explicit
+interrupted rows and are eligible for collection on the next invocation.
+After an abrupt process crash, the already-saved placeholders still provide
+row coverage. ``--force`` retains earlier attempts as history.
+
+Computed warnings and errors
+----------------------------
+
+Warnings and errors are rendering outputs, computed from the selected rows.
+They are never stored in the measurement database and never affect its cache.
+A typical figure distinguishes timeouts from execution failures, excludes null
+measurements from averages, and decides which conditions deserve a message:
+
+.. code-block:: python
+
+   @reg.table("Summary")
+   def summary(data):
+       rows = data["measurements"]
+       if any(row["status"] == "timed-out" for row in rows):
+           eval_live.warn("Some treatments timed out; averages use completed runs.")
+       if any(row["status"] == "failure" for row in rows):
+           eval_live.error("Some treatments failed; inspect their diagnostics.")
+       completed = [row["seconds"] for row in rows if row["status"] == "success"]
+       return [{"requested": len(rows), "completed": len(completed),
+                "mean_seconds": sum(completed) / len(completed) if completed else None}]
+
+This policy belongs to the paper: a timeout may be an expected result worth
+plotting, while an unexpected failure may justify a reporting error. The
+library does not impose either policy. Normal error/timeout rows remain usable
+by every dependent output.
+
+``eval_live.warn(message)`` and ``eval_live.error(message)`` show messages as
+callbacks run. Identical level/message pairs are deduplicated across outputs.
+The CLI ends with all warnings followed by all errors. Warnings do not fail
+the command; reporting errors give a failing exit status after the remaining
+outputs have rendered. An exception in a figure is also a reporting error and
+does not prevent the other figures from running.
+
+The interactive page shows derived Warnings and Errors tables. Messages update
+with filtered data; they are not appended to the raw tables. ``--render-only``
+recomputes messages, so changing figure policy needs no new measurements.
+
+Replay
+------
+
+``--render-only`` uses the latest invocation with completed collection, or
+``--invocation ID``. It replays saved selections, including empty requirements, without evaluating
 selectors, resolving Git refs, or collecting. The rendering script and its
 dependencies must remain available. Use ``--only`` when replaying an invocation
 that contained only a subset of outputs. ``--data PATH`` shares a cache across
 output directories; use separate directories for subset reports because old
 unrelated generated files remain in place.
 
-The original ``run_tables(data)``, ``run_graphs(data)``, terminal renderer, and
-``render_to_dir(data, path)`` still use data supplied by the caller and never
-collect. The directory renderer preserves table JSON sidecars; ``reg.run``
+``run_tables(data)``, ``run_graphs(data)``, the terminal renderer, and
+``render_to_dir(data, path)`` use data supplied by the caller and never
+collect. The directory renderer writes table JSON sidecars; ``reg.run``
 writes all evaluation data to one JSON file.
 
 Interactive reports
@@ -274,7 +343,7 @@ or supply ``browser_source=Path(__file__)`` explicitly. Keep execution under
 callbacks or the entry point. Registration is safe during browser imports.
 Treatment selectors can be lambdas or closures: replay does not execute them.
 
-``filter_source(rows, data)`` keeps the original contract: return a data
+Use ``filter_source(rows, data)`` to return a data
 dictionary with raw tables narrowed to visible computed rows. Preserve metadata
 with ``{**data, ...}`` when replacing tables. Filters chain in registration order.
 Handle empty filtered data in graph/table callbacks.

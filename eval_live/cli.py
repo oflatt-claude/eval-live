@@ -35,7 +35,7 @@ def add_arguments(parser: ArgumentParser, *, output: str | Path = "out") -> Argu
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1, metavar="N",
                         help="maximum concurrent parallel=True treatments (default: CPU count); 1 runs sequentially")
     parser.add_argument("--timeout", type=positive_seconds, default=None, metavar="SECONDS",
-                        help="per-command deadline (default: each Benchmark.timeout); increasing it retries cached timeouts")
+                        help="per-command deadline (default: no limit unless configured on the benchmark)")
     parser.add_argument("--force", action="store_true", help="collect fresh observations, retaining history")
     parser.add_argument("--dry-run", action="store_true", help="show the plan without builds or writes")
     parser.add_argument("--render-only", action="store_true", help="render a saved invocation without Git or collection")
