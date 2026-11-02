@@ -303,7 +303,8 @@ reporting errors, or a failing CLI exit status.
 
 Ctrl+C stops the whole evaluation: active workers and their commands are
 cancelled on POSIX, queued treatments do not start, and figure generation is
-skipped. Completed rows remain saved; unfinished treatments keep explicit
+skipped. Temporary worktrees and their Git registrations are removed after
+workers stop. Completed rows remain saved; unfinished treatments keep explicit
 interrupted rows and are eligible for collection on the next invocation.
 After an abrupt process crash, the already-saved placeholders still provide
 row coverage. ``--force`` retains earlier attempts as history.

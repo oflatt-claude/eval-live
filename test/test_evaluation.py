@@ -291,6 +291,7 @@ class EvaluationTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "POSIX signal and process-group behavior")
     def test_parallel_interrupt_stops_commands_and_checkpoints_attempts(self):
         import signal
+        before = self.git("worktree", "list", "--porcelain")
         pids = self.root / "pids"
         pids.mkdir()
         script = self.root / "interrupt.py"
@@ -325,6 +326,8 @@ class EvaluationTests(unittest.TestCase):
         self.assertFalse((self.output / "index.html").exists())
         self.assertEqual([r["status"] for r in data["eval_processes"]], ["interrupted", "interrupted"])
         self.assertEqual(data["eval_invocations"][0]["status"], "interrupted")
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
+        self.assertTrue(all(not Path(row["cwd"]).exists() for row in data["eval_processes"]))
         for path in pids.iterdir():
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(path.read_text()), 0)
@@ -822,6 +825,7 @@ class EvaluationTests(unittest.TestCase):
         self.data.write_text(original)
 
     def test_interrupt_records_process_and_attempt(self):
+        before = self.git("worktree", "list", "--porcelain")
         outcome = ProcessResult(("worker",), str(self.repo), 0.1, -9, "partial stdout", "", "interrupted")
         benchmark = eval_live.Benchmark("read", slow, "1", error_rows=error_rows)
         with patch("eval_live.benchmarks.run_command", side_effect=ProcessInterrupted(outcome)):
@@ -831,6 +835,29 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(data["eval_invocations"][0]["status"], "interrupted")
         self.assertEqual(data["eval_runs"][0]["status"], "interrupted")
         self.assertEqual(data["eval_processes"][0]["stdout"], "partial stdout")
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
+
+    def test_interrupt_while_preparing_checkout_removes_worktree(self):
+        from eval_live.targets import git
+
+        before = self.git("worktree", "list", "--porcelain")
+        directories = []
+
+        def interrupt_after_add(repository, *arguments):
+            result = git(repository, *arguments)
+            if arguments[:2] == ("worktree", "add"):
+                directories.append(Path(arguments[-2]))
+                raise KeyboardInterrupt
+            return result
+
+        with patch("eval_live.targets.git", side_effect=interrupt_after_add):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_eval()
+        self.assertEqual(len(directories), 1)
+        self.assertFalse(directories[0].parent.exists())
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
+        self.assertEqual(self.stored()["eval_runs"][0]["status"], "interrupted")
+        self.assertEqual(CALLS, [])
 
     def test_protocol_version_and_helper_code_invalidate_cache(self):
         self.run_eval()

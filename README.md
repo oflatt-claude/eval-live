@@ -86,6 +86,7 @@ by `error_rows` before collection starts. The callback supplies rows for
 pending, timed-out, failed, and interrupted work; successful results replace
 the placeholders. Timeout and failure statuses remain distinct. Ctrl+C stops
 the whole evaluation, including parallel workers, while preserving those rows.
+Temporary worktrees are removed after workers stop, including on Ctrl+C.
 
 Treatment timeouts and failures are ordinary data. Figures decide whether to
 emit `eval_live.warn(...)` or `eval_live.error(...)`. These messages are computed

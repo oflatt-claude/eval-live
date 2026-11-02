@@ -87,11 +87,12 @@ class Target:
             return
         with tempfile.TemporaryDirectory(prefix="eval-live-") as temporary:
             directory = Path(temporary) / "target"
-            git(self.repository, "worktree", "add", "--quiet", "--detach", str(directory), self.commit)
             try:
+                git(self.repository, "worktree", "add", "--quiet", "--detach", str(directory), self.commit)
                 yield directory
             finally:
-                git(self.repository, "worktree", "remove", "--force", str(directory))
+                if (directory / ".git").exists():
+                    git(self.repository, "worktree", "remove", "--force", str(directory))
 
     def materialized_input_hashes(self, directory: Path, inputs: Sequence[str | Path]) -> list[dict]:
         """Hash the files actually executed, detecting callback/build mutations."""
