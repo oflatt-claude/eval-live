@@ -41,8 +41,8 @@ such as `sample`; callbacks compute averages or other statistics. CLI
 measurement parameters—including a script's total sample count—and the
 declared data `version` participate in cache identity and are saved with results.
 
-Existing methods for rendering supplied data still work. See the [Python guide](docs/python-guide.rst),
-[data format](docs/data-format.rst), and [original design plan](docs/refactor-plan.rst).
+Existing methods for rendering supplied data still work. See the
+[Python guide](docs/python-guide.rst) and [data format](docs/data-format.rst).
 
 ## Demo and Python documentation
 

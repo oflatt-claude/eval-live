@@ -16,7 +16,6 @@ dictionary interface.
    api
    data-format
    migration
-   refactor-plan
 
 Building the documentation
 --------------------------
