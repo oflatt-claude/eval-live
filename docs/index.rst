@@ -15,7 +15,6 @@ tables.
    python-guide
    api
    data-format
-   migration
 
 Building the documentation
 --------------------------

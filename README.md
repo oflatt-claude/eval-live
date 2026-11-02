@@ -160,7 +160,7 @@ same table definitions, so a table looks consistent everywhere:
 
 ```python
 reg.render_to_console(data)       # pretty tables in the terminal
-reg.render_to_dir(data, "out/")   # graphs -> <slug>.pdf, tables -> <slug>.json + <slug>.tex
+reg.render_to_dir(data, "out/")   # graphs -> <id>.pdf, tables -> <id>.json + <id>.tex
 ```
 
 `render_to_console` uses `rich` (a normal dependency) and accepts an optional

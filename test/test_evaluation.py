@@ -197,7 +197,7 @@ class EvaluationTests(unittest.TestCase):
     def evaluation(self, request=None, registry=None, benchmark=None, **kwargs):
         if registry is None:
             registry = eval_live.Registry(**kwargs)
-            registry.table("values", table, requires=request or self.request())
+            registry.table("values", table, requires=request or self.request(), id='values')
         options = vars(benchmark or eval_live.Benchmark("read", collect, "1", inputs=["value.txt"], error_rows=error_rows)).copy()
         options["fn"] = options.pop("run")
         registry.benchmark(**options, treatments=self.treatments, repository=self.repo)
@@ -218,7 +218,7 @@ class EvaluationTests(unittest.TestCase):
         reg = eval_live.Registry()
         reg.benchmark("read", callback, version="1", repository=self.repo,
                       inputs=["value.txt"], treatments=treatments, error_rows=error_rows, **options)
-        reg.table("Values", table)
+        reg.table("Values", table, id='values')
         return reg
 
     def test_parallel_workers_overlap_obey_limit_and_isolate_serial_treatments(self):
@@ -331,10 +331,10 @@ class EvaluationTests(unittest.TestCase):
     def test_decorator_registration_preserves_functions_and_direct_registration(self):
         reg = eval_live.Registry()
         self.assertIs(reg.benchmark("read", version="1", repository=self.repo, error_rows=error_rows)(collect), collect)
-        self.assertIs(reg.table("Values")(table), table)
+        self.assertIs(reg.table("Values", id='values')(table), table)
         self.assertIs(reg.graph("Figure")(figure), figure)
         self.assertIs(reg.macros("Numbers")(macros), macros)
-        self.assertIs(reg.table("Other", constant_table), constant_table)
+        self.assertIs(reg.table("Other", constant_table, id='other'), constant_table)
         result = self.run_eval(reg)
         self.assertEqual(result.collected, 1)
         self.assertEqual(len(reg._outputs), 4)
@@ -384,8 +384,8 @@ class EvaluationTests(unittest.TestCase):
 
     def test_computed_messages_are_live_deduplicated_ordered_and_never_stored(self):
         reg = eval_live.Registry()
-        reg.table("First", report_messages)
-        reg.table("Second", report_messages)
+        reg.table("First", report_messages, id='first')
+        reg.table("Second", report_messages, id='second')
         self.request()
         evaluation = self.evaluation(registry=reg)
         captured = io.StringIO()
@@ -410,8 +410,8 @@ class EvaluationTests(unittest.TestCase):
 
     def test_browser_messages_recompute_and_do_not_mutate_supplied_data(self):
         reg = eval_live.Registry()
-        reg.table("One", conditional_messages)
-        reg.table("Two", conditional_messages)
+        reg.table("One", conditional_messages, id='one')
+        reg.table("Two", conditional_messages, id='two')
         data = {"problem": True}
         reg.run_tables(data)
         self.assertEqual(reg.run_messages()[0]["rows"], [{"message": "Some values are missing"}])
@@ -421,8 +421,8 @@ class EvaluationTests(unittest.TestCase):
 
     def test_figure_exceptions_report_errors_and_other_outputs_still_render(self):
         reg = eval_live.Registry()
-        reg.table("Broken", broken_figure)
-        reg.table("Working", table)
+        reg.table("Broken", broken_figure, id='broken')
+        reg.table("Working", table, id='working')
         self.request()
         with redirect_stderr(io.StringIO()) as captured, self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
             self.run_eval(self.evaluation(registry=reg), render=True)
@@ -454,7 +454,7 @@ class EvaluationTests(unittest.TestCase):
         reg = eval_live.Registry()
         reg.benchmark("read", collect, version="1", repository=self.repo,
                       treatments=[{"suite": "a"}, {"suite": "b"}, {"suite": "a"}], error_rows=error_rows)
-        reg.table("All", table)
+        reg.table("All", table, id='all')
         reg.macros("Numbers", macros)
         result = self.run_eval(reg)
         self.assertEqual(result.collected, 2)
@@ -474,8 +474,8 @@ class EvaluationTests(unittest.TestCase):
         def unselected(treatments):
             raise AssertionError("unselected output must not evaluate its selector")
 
-        reg.table("Selected", table, requires=needed)
-        reg.table("Other", table, requires=unselected)
+        reg.table("Selected", table, requires=needed, id='selected')
+        reg.table("Other", table, requires=unselected, id='other')
         result = self.run_eval(reg, only=["selected"])
         self.assertEqual(result.collected, 4)
         self.assertEqual({config["size"] for _, config, _ in CALLS}, {10, 20})
@@ -490,7 +490,7 @@ class EvaluationTests(unittest.TestCase):
         for selector in selectors:
             reg = eval_live.Registry()
             reg.benchmark("read", collect, version="1", repository=self.repo, treatments=[{"size": 10}], error_rows=error_rows)
-            reg.table("Invalid", table, requires=selector)
+            reg.table("Invalid", table, requires=selector, id='invalid')
             with self.assertRaisesRegex(ValueError, "invalid treatment selection for invalid/data"):
                 reg.plan(args={"output": self.output})
         self.assertFalse(self.output.exists())
@@ -499,7 +499,7 @@ class EvaluationTests(unittest.TestCase):
     def test_empty_named_selection_replays_without_evaluating_selector(self):
         reg = eval_live.Registry()
         reg.benchmark("read", collect, version="1", repository=self.repo, error_rows=error_rows)
-        reg.table("Empty", empty_named_table, requires={"empty": lambda ts: []})
+        reg.table("Empty", empty_named_table, requires={"empty": lambda ts: []}, id='empty')
         result = self.run_eval(reg, render=True)
         self.assertEqual(result.collected, 0)
         self.repo.rename(self.root / "moved")
@@ -508,7 +508,7 @@ class EvaluationTests(unittest.TestCase):
             raise AssertionError("replay must not evaluate selectors")
 
         replay = eval_live.Registry()
-        replay.table("Empty", empty_named_table, requires={"empty": unavailable})
+        replay.table("Empty", empty_named_table, requires={"empty": unavailable}, id='empty')
         self.run_eval(replay, render=True, render_only=True)
         self.assertEqual(self.stored()["eval_runs"], [])
         self.assertEqual(len(self.stored()["eval_requirements"]), 2)
@@ -516,9 +516,9 @@ class EvaluationTests(unittest.TestCase):
     def test_explicit_sample_treatments_and_shared_requirements(self):
         request = self.request(samples=2)
         reg = eval_live.Registry()
-        reg.table("first", table, requires=request)
+        reg.table("first", table, requires=request, id='first')
         more = self.request(samples=3)
-        reg.table("second", table, requires=lambda ts: [*request(ts), *more(ts)])
+        reg.table("second", table, requires=lambda ts: [*request(ts), *more(ts)], id='second')
         result = self.run_eval(self.evaluation(registry=reg))
         self.assertEqual(result.collected, 3)
         selected = self.stored()["eval_selections"]
@@ -529,8 +529,8 @@ class EvaluationTests(unittest.TestCase):
 
     def test_selection_before_collection_and_invalid_subsets(self):
         reg = eval_live.Registry()
-        reg.table("first", table, requires=self.request(factor=1))
-        reg.table("second", table, requires=self.request(factor=2))
+        reg.table("first", table, requires=self.request(factor=1), id='first')
+        reg.table("second", table, requires=self.request(factor=2), id='second')
         self.run_eval(self.evaluation(registry=reg), only=["second"])
         self.assertEqual([call[1] for call in CALLS], [{"factor": 2}])
         with self.assertRaisesRegex(ValueError, "subset excludes"):
@@ -567,9 +567,9 @@ class EvaluationTests(unittest.TestCase):
         (self.repo / "value.txt").write_text("999")
         reg = eval_live.Registry()
         reg.table("comparison", comparison, requires={"baseline": self.request(commit=self.old),
-                                                       "candidate": self.request(commit=self.head)})
+                                                       "candidate": self.request(commit=self.head)}, id='comparison')
         reg.table("reverse", comparison, requires={"baseline": self.request(commit=self.head),
-                                                    "candidate": self.request(commit=self.old)})
+                                                    "candidate": self.request(commit=self.old)}, id='reverse')
         before = self.git("worktree", "list", "--porcelain")
         self.run_eval(self.evaluation(registry=reg), render=True)
         self.assertIn("10 & 20", (self.output / "comparison.tex").read_text())
@@ -596,8 +596,8 @@ class EvaluationTests(unittest.TestCase):
 
     def test_failures_checkpoint_and_independent_requests_continue(self):
         reg = eval_live.Registry()
-        reg.table("broken", table, requires=self.request(fail=True, samples=3))
-        reg.table("working", table, requires=self.request())
+        reg.table("broken", table, requires=self.request(fail=True, samples=3), id='broken')
+        reg.table("working", table, requires=self.request(), id='working')
         result = self.run_eval(self.evaluation(registry=reg))
         self.assertEqual(result.collected, 4)
         data = self.stored()
@@ -617,8 +617,8 @@ class EvaluationTests(unittest.TestCase):
     def test_increasing_timeout_reuses_successes_and_retries_only_timeouts(self):
         benchmark = eval_live.Benchmark("read", timed_collect, "1", error_rows=error_rows)
         reg = eval_live.Registry()
-        reg.table("fast", table, requires=self.request())
-        reg.table("slow", table, requires=self.request(delayed=True))
+        reg.table("fast", table, requires=self.request(), id='fast')
+        reg.table("slow", table, requires=self.request(delayed=True), id='slow')
         evaluation = self.evaluation(registry=reg, benchmark=benchmark)
         self.run_eval(evaluation, timeout=0.01)
         original = self.stored()["eval_runs"]
@@ -633,8 +633,8 @@ class EvaluationTests(unittest.TestCase):
         arguments = read_parameters([row for row in data["eval_arguments"] if row["invocation_id"] == result.invocation_id])
         self.assertEqual(arguments["timeout"], 5)
         reg = eval_live.Registry()
-        reg.table("fast", table, requires=self.request())
-        reg.table("slow", table, requires=self.request(delayed=True))
+        reg.table("fast", table, requires=self.request(), id='fast')
+        reg.table("slow", table, requires=self.request(delayed=True), id='slow')
         evaluation = self.evaluation(registry=reg,
                                      benchmark=eval_live.Benchmark("read", timed_collect, "1", timeout=10, error_rows=error_rows))
         result = self.run_eval(evaluation)
@@ -727,7 +727,7 @@ class EvaluationTests(unittest.TestCase):
         benchmark = eval_live.Benchmark("read", use_binary, "1", build=build, inputs=["value.txt"], error_rows=error_rows)
         requests = [self.request(value=1, samples=2), self.request(value=2)]
         reg = eval_live.Registry()
-        reg.table("values", table, requires=lambda ts: [t for select in requests for t in select(ts)])
+        reg.table("values", table, requires=lambda ts: [t for select in requests for t in select(ts)], id='values')
         evaluation = self.evaluation(registry=reg, benchmark=benchmark)
         result = self.run_eval(evaluation)
         self.assertEqual(result.collected, 3)
@@ -793,7 +793,7 @@ class EvaluationTests(unittest.TestCase):
         self.run_eval(self.evaluation(self.request(samples=3)))
         request = self.request(samples=2)
         reg = eval_live.Registry()
-        reg.table("values", table, requires=request)
+        reg.table("values", table, requires=request, id='values')
         reg.graph("figure", figure, requires=request)
         reg.macros("macros", macros, requires=request)
         result = self.run_eval(self.evaluation(registry=reg), render=True)
@@ -817,15 +817,24 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "filename-safe"):
             reg.table("invalid", table, id="../escape")
         with self.assertRaisesRegex(ValueError, "selector"):
-            reg.table("invalid", table, requires={"empty": []})
-        reg.table("Values!", table, requires=self.request())
+            reg.table("invalid", table, requires={"empty": []}, id='invalid')
+        reg.table("Values!", table, requires=self.request(), id='values')
         with self.assertRaisesRegex(ValueError, "IDs.*unique"):
             self.run_eval(reg)
         self.assertEqual(CALLS, [])
 
+    def test_table_function_name_controls_export_and_selection_across_title_changes(self):
+        for title in ("Static text", "A renamed display title"):
+            reg = eval_live.Registry()
+            self.assertIs(reg.table(title)(constant_table), constant_table)
+            result = self.run_eval(reg, render=True, only=["constant_table"])
+            self.assertEqual(result.collected, 0)
+            self.assertIn("No benchmark required", (self.output / "constant_table.tex").read_text())
+        self.assertEqual({r["artifact_id"] for r in self.stored()["eval_requirements"]}, {"constant_table"})
+
     def test_registry_can_render_static_outputs_without_benchmarks(self):
         reg = eval_live.Registry()
-        reg.table("Static text", constant_table)
+        reg.table("Static text", constant_table, id='static-text')
         result = self.run_eval(reg, render=True)
         self.assertEqual(result.collected, 0)
         self.assertIn("No benchmark required", (self.output / "static-text.tex").read_text())
@@ -840,7 +849,7 @@ class RegistryTests(unittest.TestCase):
             exec(eval_live.pyodide_lib(), module.__dict__)
             reg = module.Registry()
             reg.benchmark("worker", collect, version="1", error_rows=error_rows)
-            reg.table("Values", table, requires=lambda treatments: treatments)
+            reg.table("Values", table, requires=lambda treatments: treatments, id='values')
             self.assertEqual(reg.run_tables({"measurements": [{"value": 7}]})[0]["rows"],
                              [{"value": 7, "sample": 0}])
 
@@ -854,8 +863,8 @@ class RegistryTests(unittest.TestCase):
             values = {row["value"] for row in rows}
             return {**data, "measurements": [row for row in data["measurements"] if row["value"] in values]}
 
-        reg.table("First table", table, keep, requires=request, caption="Original signature")
-        reg.table("Second table", table, keep)
+        reg.table("First table", table, keep, requires=request, caption="Original signature", id='first-table')
+        reg.table("Second table", table, keep, id='second-table')
         reg.macros("Paper numbers", macros)
         reg.graph("First table", figure)  # Existing renderers allow graph/table titles to match.
         filtered = reg.apply_table_filters([

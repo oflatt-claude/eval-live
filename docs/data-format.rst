@@ -91,5 +91,4 @@ writer holds ``results.json.lock``; concurrent writers fail immediately. The
 lock file can remain after exit, but the lock is released when the writer
 stops. Benchmark results are stored only in the JSON file.
 
-The generated HTML includes the saved tables and command diagnostics. See
-:doc:`migration` for compatibility with earlier data files.
+The generated HTML includes the saved tables and command diagnostics.

@@ -19,7 +19,7 @@ The demo creates a tiny local Git repository with two commits. No clone or
 compiler is needed. It writes one ``demo/out/paper/results.json`` data/cache
 file plus ``runtime.pdf``, ``history.pdf``, ``summary.tex``, ``macros.tex``, and
 ``index.html``. The sibling lock file is writer coordination, not stored data.
-A first-ever dry-run requires initializing the fixture by running the demo.
+A first-ever dry-run requires creating the workload repository by running the demo.
 
 Declare treatments and a collection callback
 --------------------------------------------
@@ -100,7 +100,7 @@ Omitting ``requires`` selects the whole catalog.
    @reg.table("Selected suites", requires=needed)
    def summary(data):
        return [{"observations": len(data.get("measurements", []))}]
-   reg.table("All treatments", summary)  # everything declared
+   reg.table("All treatments", summary, id="all_treatments")  # everything declared
    reg.run(args=args, argv=tokens)
 
 Only selected outputs' selectors are evaluated. Their results are combined
@@ -142,8 +142,10 @@ when treatments depend on CLI arguments parsed in ``main``.
 Graphs return matplotlib Figures; tables return lists of row dictionaries,
 including styled cells. ``reg.macros(name, fn)`` registers a callback returning
 LaTeX macro names and scalar values. Macro names contain letters only; values
-are escaped. Filenames and ``--only`` use the display name's slug, or explicit
-``id=`` values. Output IDs and titles must be unique for ``reg.run``.
+are escaped. Table filenames and ``--only`` use the callback's function name;
+graph and macro IDs use the display title's slug. Explicit ``id=`` values
+override either default. Output IDs and titles must be unique for ``reg.run``;
+give distinct IDs when registering one table function more than once.
 
 Repetitions, keys, and CLI configuration
 ----------------------------------------

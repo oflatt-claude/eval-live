@@ -76,7 +76,7 @@ The page does not collect measurements.
 Read [eval.py](eval.py) from the top: rendering callbacks registered with
 `@reg.table`, `@reg.graph`, and `@reg.macros`, followed by the error-row and
 collection functions. `main` declares the treatments and runs the evaluation.
-The fixture's source files are in [fixture/](fixture/); its generated repository
+The workload's source files are in [workload/](workload/); its generated repository
 is in `demo/out/repository`. `--commit` and `--baseline` select its revisions.
 
 Collection is sequential by default. `--parallel` adds `parallel=True` to

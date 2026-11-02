@@ -113,7 +113,7 @@ def membership(context):
 
 def main(argv=None):
     import argparse
-    from fixture import make_repository
+    from workload import make_repository
     from pathlib import Path
     import sys
 
@@ -133,7 +133,7 @@ def main(argv=None):
         parser.error("--sizes must contain distinct positive integers")
     if not args.render_only:
         if args.dry_run and not (args.repository / ".git").exists():
-            parser.error("run the demo once to create its fixture before using --dry-run")
+            parser.error("run the demo once to create its workload repository before using --dry-run")
         if not args.dry_run:
             make_repository(args.repository)
 

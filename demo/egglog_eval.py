@@ -10,7 +10,7 @@ reg = eval_live.Registry(selection_arguments=["files", "modes", "repository", "b
                          title="Egglog evaluation")
 
 
-@reg.table("Egglog timings", id="timings")
+@reg.table("Egglog timings")
 def timings(data):
     groups = defaultdict(list)
     for row in data["timings"]:

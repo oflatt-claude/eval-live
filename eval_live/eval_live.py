@@ -277,8 +277,14 @@ class Registry:
             return lambda callback: self._add(kind, name, callback, requires, id, caption, filter_source)
         if not callable(fn):
             raise ValueError("output callback must be callable")
-        output_id = id if id is not None else re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "graph"
-        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", output_id):
+        output_id = id
+        if output_id is None and kind == "table":
+            output_id = getattr(fn, "__name__", None)
+            if output_id == "<lambda>":
+                output_id = None
+        if output_id is None:
+            output_id = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "graph"
+        if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_-]*", output_id):
             raise ValueError("output IDs must be filename-safe letters, digits, underscores, or hyphens")
         self._outputs.append(_Output(kind, output_id, name, fn, _requirements(requires), caption, filter_source))
         return fn
@@ -305,8 +311,10 @@ class Registry:
         ``filter_source(filtered_rows, data) -> data`` returns a dictionary
         with raw tables narrowed to matching rows.
         Filters are chained in registration order. ``caption`` is shown below
-        the table in the terminal and browser. ``requires`` and ``id`` work as
-        in :meth:`graph`.
+        the table in the terminal and browser. ``requires`` works as in :meth:`graph`.
+        ``id`` defaults to the function name and controls filenames and ``--only``.
+        Lambdas and callables without names use a slug of the display title.
+        Set ``id`` explicitly when registering the same function more than once.
         ``@reg.table(name, ...)`` is the equivalent decorator form.
         """
         return self._add("table", name, fn, requires, id, caption, filter_source)
