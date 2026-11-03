@@ -39,8 +39,8 @@ These are rendered as filterable HTML tables below the raw data tables::
 Interactive filters
 -------------------
 When the user types in a computed table's filter box, only some computed
-rows remain visible. An ``interactive_filter`` function lets you propagate that
-filter back to the *raw* data tables.
+output rows remain visible. ``interactive_filter`` uses those surviving output
+rows to choose which input rows other tables and figures should receive.
 
 It receives two arguments:
 
@@ -49,8 +49,9 @@ It receives two arguments:
 - **data**: the shared data dictionary after raw-table filters and any
   preceding interactive filters, including other outputs' commits and treatments.
 
-It returns a **new data dict** with the appropriate raw rows removed.
-eval-live then hides raw-table rows that aren't in the returned data.
+It returns a **new data dict** containing the input rows to keep. eval-live
+updates the raw-table views and recomputes displayed tables and figures from
+those inputs. Saved data is unchanged.
 
 Example: if your computed table has one row per (file, treatment) pair,
 the interactive_filter narrows raw timings to matching pairs::
@@ -314,10 +315,12 @@ class Registry:
         """Register ``fn(data) -> list[dict]``; row keys are column headings.
 
         Cells can be scalars or styled ``{"text": ..., "style": ...}`` values.
-        ``interactive_filter(filtered_rows, data) -> data`` propagates browser
-        selections to raw tables. It receives shared data across all outputs,
-        after raw-table filters and preceding interactive filters, and returns
-        a dictionary with tables narrowed to matching rows. Preserve other
+        ``interactive_filter(filtered_rows, data) -> data`` selects input rows
+        to keep based on the computed output rows still visible after the user's
+        filter. It receives shared data across all outputs, after raw-table
+        filters and preceding interactive filters. Return a new data dictionary
+        containing those inputs; tables and figures are recomputed from it.
+        Without this callback, filtering affects only this table's view. Preserve other
         tables and metadata with ``{**data, ...}``. Filters chain in registration
         order and never collect data. ``caption`` is shown below the table in
         the terminal and browser. ``requires`` works as in :meth:`graph` and

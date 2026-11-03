@@ -376,22 +376,33 @@ Treatment selectors can be lambdas or closures: replay does not execute them.
 callback to its selected data. Browser filtering does not change these
 requirements or collect more data.
 
-Register ``@reg.table("Summary", interactive_filter=narrow_summary, ...)`` to
-propagate visible computed rows to other tables and figures. The callback receives
-those rows and the shared dataset across all outputs, after raw-table filters
-and preceding interactive filters. It returns a dictionary with raw tables
-narrowed to matching rows. Preserve other tables and metadata with
-``{**data, ...}``. Filters chain in registration order. Handle empty filtered
-data in graph/table callbacks.
+``interactive_filter`` filters input data based on the output rows that remain
+visible in a computed table:
 
-For example, a summary of the current commit can filter measurements by size
-across both baseline and current commits. A comparison figure then receives
-the matching rows within its own requirements. Filters can also use measured
-or computed values, such as a summary's median runtime.
+1. The browser applies the user's filter to the table's computed output rows.
+2. Your ``interactive_filter(filtered_rows, data)`` callback receives the surviving
+   output rows and returns a data dictionary containing the input rows to keep.
+3. eval-live updates raw tables and recomputes displayed tables and figures from
+   those inputs, within each output's ``requires`` selection.
+
+The callback defines the relationship between output and input rows. For example,
+Summary has one row per algorithm and input size, with a median computed from
+several samples. Filtering Summary by ``median_ms < 1`` selects some of those
+groups. The callback keeps all input samples for their algorithm/size pairs,
+across both baseline and current commits:
 
 .. literalinclude:: ../demo/eval.py
    :language: python
    :pyobject: narrow_summary
+
+Register it with ``@reg.table("Summary", interactive_filter=narrow_summary)``.
+Without this callback, filtering a computed table changes only that table's view.
+
+``data`` contains shared inputs across all outputs, after raw-table filters and
+preceding interactive filters. Return a new dictionary and preserve other tables
+and metadata with ``{**data, ...}``. Filters chain in registration order. Handle
+empty input tables in graph/table callbacks. Filtering changes the browser view;
+the saved data stays unchanged.
 
 Open the HTML directly. Raw tables need no Python runtime; computed tables and
 graphs fetch Pyodide and matplotlib from a pinned CDN. The browser never runs

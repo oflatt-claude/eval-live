@@ -157,6 +157,13 @@ reg.table("Summary", summary_fn, interactive_filter=summary_filter_fn)
 eval_live.registry = reg
 ```
 
+`interactive_filter(filtered_rows, data)` filters the **input data** based on
+the computed **output rows** still visible after the user's filter. For example,
+if a summary groups samples by algorithm and input size, the callback keeps
+all input samples for the visible groups. It returns a new data dictionary,
+which eval-live uses to redraw tables and figures. Saved data stays unchanged.
+Without this callback, filtering a computed table changes only that table's view.
+
 See the [Python guide](docs/python-guide.rst) and
 [API reference](docs/api.rst) for graphs, tables, and filter propagation.
 
