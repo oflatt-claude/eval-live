@@ -1,6 +1,24 @@
-/* Recompute reports from a snapshot of the current filters. Only the latest
-   complete calculation is published. Pyodide calls are serialized. */
+/* Calculate browser reports; DOM updates belong to eval-live.js.
+   Each input change requests a complete calculation. Tables, graphs, and
+   diagnostics are published together for the latest requested filters.
+   Loaded as a plain script after state.js; the page supplies loadPyodide. */
 
+/**
+ * Create an engine that evaluates graphScript's eval_live.registry in Pyodide.
+ *
+ * @param {string} graphScript Python that registers the report callbacks
+ * @param {string} evalLivePy source of the eval_live Python module
+ * @param {function} setState applies a state mutator and redraws the view;
+ *   it must not call tick, or publishing a result would start another calculation
+ * @param {Object.<string,string>} [extraModules] Python filenames mapped to source
+ * @returns {{tick: function}} Call tick(state) initially and after filter changes.
+ *   Keep state.data unchanged for the viewer's lifetime. Presentation-only changes
+ *   such as selecting a graph do not require a calculation.
+ *
+ * Display results only while engine.status is "ready". An unhandled failure
+ * sets status to "error" with statusText describing it. An obsolete calculation's
+ * results and errors are discarded; its Python execution is allowed to finish.
+ */
 function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
   let pyodide = null;
   let loadPromise = null;
@@ -106,6 +124,8 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
     pyodide.runPython("import eval_live; eval_live.registry = None");
     await pyodide.runPythonAsync(graphScript);
     const raw = rawFilteredData(snapshot);
+    // Select groups from tables before input narrowing. Feeding displayed tables
+    // back into this selection would make the filters depend on their own results.
     snapshot.engine.computedUnfiltered = await runTables(raw);
     const filters = computedFilterInputs(snapshot);
     snapshot.engine.narrowing = filters.length ? await runNarrowing(filters, raw) : null;
@@ -113,11 +133,14 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
     snapshot.engine.computedTables = filters.length
       ? await runTables(data) : snapshot.engine.computedUnfiltered;
     snapshot.engine.graphs = await runGraphs(data);
+    // Read diagnostics after the callbacks have seen the final filtered data.
     const messages = await runTables(data, true);
     return {...snapshot.engine, messages, status: "ready", statusText: ""};
   }
 
   async function drain() {
+    // Pyodide has shared globals: finish one calculation before starting another.
+    // tick replaces pending work, so only the newest queued selection is evaluated.
     if (running) return;
     running = true;
     try {
@@ -138,7 +161,8 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
     }
   }
 
-  // Called only for input changes, never for engine results or display controls.
+  // Copy the filters before any await; an in-flight calculation must not observe
+  // later edits. The revision also prevents it from publishing after a newer tick.
   function tick(state) {
     pending = {revision: ++revision, snapshot: {
       data: state.data,

@@ -362,7 +362,8 @@ Only measurement data is cached. Each invocation regenerates figures, tables,
 macros, and HTML, replacing the previous generated report in its output
 directory. Outputs omitted by ``--only`` or callbacks returning ``None`` are
 removed. ``--data PATH`` shares a measurement cache across output directories;
-use separate output directories to keep several reports.
+use separate output directories to keep several reports. Concurrent invocations
+must use separate output directories.
 
 ``run_tables(data)``, ``run_graphs(data)``, the terminal renderer, and
 ``render_to_dir(data, path)`` use data supplied by the caller and never

@@ -15,12 +15,20 @@
    rows are never rebuilt, so it persists naturally without bloating state. */
 
 /**
+ * Build a table view whose sync(state) reads controls from the given kind/name.
+ * Rebuild the view when rows or optionRows change; keep those inputs unchanged
+ * while it is in use. Computed values are hidden while the engine is loading or
+ * failed, and filter controls remain available to edit the selection.
+ *
  * @param {string} name         displayed table name
  * @param {Array}  rows         the table's rows (fixed for the life of the view)
  * @param {string} kind         "raw" | "computed" | "message"
  * @param {boolean} filterable  show the filter toolbar + per-column inputs
  * @param {string} [description] clarifying subtitle
- * @param {Object} handlers     callbacks receive name, action arguments, then kind
+ * @param {Object} handlers     callbacks:
+ *   onToggleCollapse(name, kind), onSql(name, value, kind),
+ *   onColFilter(name, column, value, kind), onHighlight(name, mode, kind),
+ *   onCheckbox(name, column, checkedValues, allValues, kind)
  * @param {Array} [optionRows]   rows the checkbox dropdowns enumerate (the
  *                               UNFILTERED rows, so options don't vanish as the
  *                               displayed `rows` narrow). Defaults to `rows`.
@@ -112,7 +120,8 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     dropdowns.className = "checkbox-dropdowns";
     for (const col of cols) {
       const values = distinctScalarValues(optionRows, col);
-      if (values === null || col.includes("]")) continue;         // non-scalar column; no dropdown
+      // SQL checkboxes need scalar values and names usable in [quoted] identifiers.
+      if (values === null || col.includes("]")) continue;
       if (values.length >= 30) continue;     // too many to checkbox; use typed SQL
 
       const details = document.createElement("details");

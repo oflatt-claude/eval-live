@@ -461,6 +461,11 @@ class _Runner:
         return ready, selections
 
     def _render_only(self, store: Store, options: dict, argv: Sequence[str]) -> EvaluationResult:
+        """Replay saved selections with matching requirements and data versions.
+
+        Reject incompatible declarations before changing files or recording a new
+        invocation. Selectors, Git resolution, and measurement callbacks do not run.
+        """
         artifacts = self._artifacts(options)
         saved = options["invocation"]
         if saved is None:

@@ -1,5 +1,8 @@
-/* Own the viewer state. Input changes request a complete calculation; engine
-   results and presentation controls only redraw the page. */
+/* Own the viewer state and connect controls, calculations, and the DOM.
+   Filter edits request an engine calculation. Engine status/results and display
+   controls only redraw the view, so publishing results cannot trigger a loop.
+   Table controls live in state.ui and survive replacement of computed rows.
+   Loaded after state.js, table-view.js, and graph-engine.js as a plain script. */
 
 // Clarifying subtitles for known raw result tables.
 const TABLE_DESCRIPTIONS = {
@@ -15,6 +18,11 @@ const TABLE_DESCRIPTIONS = {
 /**
  * Render evaluation tables (and, when a graph script is supplied, Pyodide graphs
  * + computed tables) into a container.
+ *
+ * Keep data unchanged after initialization. Both graphScript and evalLivePy are
+ * needed for Python outputs; raw tables work without them. Whole numbers outside
+ * JavaScript's exact integer range raise an error instead of being displayed.
+ *
  * @param {HTMLElement|string} container
  * @param {Object} data - { tableName: rows[] }
  * @param {string} [name] - project name shown in the heading
@@ -22,6 +30,8 @@ const TABLE_DESCRIPTIONS = {
  * @param {string} [evalLivePy] - source of eval_live.py
  * @param {Object.<string,string>} [extraModules] - {filename: source} extra
  *   Python modules written to the Pyodide filesystem, importable by graphScript
+ * @returns {Object} getState() exposes the current state, setState(mutator,
+ *   recompute=true) applies a change, and render() redraws without running Python.
  */
 function initEvalLive(container, data, name, graphScript, evalLivePy, extraModules = {}) {
   if (typeof container === "string") container = document.getElementById(container);
@@ -32,6 +42,11 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
   let engine = null;   // created at the end, once the DOM skeleton exists
 
   // --- reducer dispatch ---------------------------------------------------
+  /**
+   * Apply a synchronous state mutation and redraw. Return false from mutator
+   * for a no-op. Keep recompute=true for filter edits; engine updates and changes
+   * to collapse, highlighting, or the active graph must pass false.
+   */
   function setState(mutator, recompute = true) {
     const changed = mutator(state);
     if (changed === false) return;          // reducer reported a no-op
@@ -104,9 +119,8 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
     for (const v of rawViews) rawContainer.appendChild(v.section);
   }
 
-  // Computed table views: rebuilt whenever the engine replaces computedTables
-  // (detected by array-reference identity, which the engine bumps only on a real
-  // recompute). UI state lives in state.ui, so it survives the rebuild.
+  // Replace computed views when the engine publishes a report. Their controls
+  // remain in state.ui, independent of the rows being replaced.
   let computedViews = [];
   let lastComputedRef = null;
   let lastUnfilteredRef = null;

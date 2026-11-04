@@ -20,7 +20,11 @@ PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyodide.js"
 
 
 def discard_outputs(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", table_json=False):
-    """Remove generated outputs while preserving measurements and unrelated files."""
+    """Remove expected artifacts, HTML, and files recorded by previous rendering.
+
+    Generated filenames are reserved for eval-live. Files at other paths,
+    including the measurement database, are preserved. Missing files are allowed.
+    """
     names = {f"{item.id}.{fmt if item.kind == 'graph' else 'tex'}" for item in artifacts}
     if table_json:
         names.update(f"{item.id}.json" for item in artifacts if item.kind == "table")
@@ -36,6 +40,12 @@ def discard_outputs(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", ta
 
 @contextmanager
 def output_directory(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", table_json=False):
+    """Yield an empty staging directory and publish its files on successful exit.
+
+    Write only direct child files there. Previous generated outputs are removed
+    on entry; exceptions, including Ctrl+C, remove partially published outputs
+    and propagate. The caller must prevent concurrent rendering to ``output``.
+    """
     output.mkdir(parents=True, exist_ok=True)
     discard_outputs(output, artifacts, fmt=fmt, table_json=table_json)
     with tempfile.TemporaryDirectory(prefix=".eval-live-", dir=output) as temporary:
@@ -43,6 +53,8 @@ def output_directory(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", t
         try:
             yield staging
             names = sorted(path.name for path in staging.iterdir())
+            # Record the whole set before moving files so cleanup also covers a
+            # failure partway through publication.
             atomic_write(output / ".eval-live-outputs", "\n".join(names) + "\n")
             for name in names:
                 (staging / name).replace(output / name)
@@ -52,7 +64,11 @@ def output_directory(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", t
 
 
 def browser_numbers(value):
-    """Reject integers the browser would silently round; keep the JSON data intact."""
+    """Raise ValueError for whole numbers outside ±(2**53 - 1), without coercion.
+
+    Checks nested dictionaries and sequences; string identifiers remain strings.
+    The measurement store is independent of this browser export restriction.
+    """
     if (type(value) is int or type(value) is float and value.is_integer()) and abs(value) > 2**53 - 1:
         raise ValueError(f"integer {value} exceeds the browser's exact range; use a string for identifiers")
     if isinstance(value, dict):
@@ -78,7 +94,7 @@ def source_for(artifacts: Sequence[_Output], source: str | Path | None) -> str:
 
 def write_html(path: str | Path, data: dict, artifacts: Sequence[_Output], selections: dict,
                *, source: str | Path | None = None, title: str = "Paper evaluation") -> Path:
-    """Embed data and Python callbacks using the existing interactive viewer.
+    """Write an HTML report containing data, saved selections, and Python callbacks.
 
     Source is imported as a module, so a normal ``if __name__ == '__main__'``
     guard prevents collection in the browser. Keep local execution imports in
@@ -139,7 +155,12 @@ eval_live.registry = _reg._bind({selections!r})
 
 def render_outputs(data: dict, outputs: Sequence[_Output], output: str | Path, *,
                    fmt: str = "pdf", dpi: int = 150, table_json: bool = False) -> list[Path]:
-    """Shared file renderer for Registry.run and Registry.render_to_dir."""
+    """Replace generated files using supplied data and return their paths.
+
+    Evaluate each output once. ``None`` omits a graph. With ``table_json=True``,
+    nonempty tables produce JSON and LaTeX; otherwise even empty tables produce
+    a LaTeX file. Exceptions leave no generated report. No measurements are run.
+    """
     output = Path(output)
     with output_directory(output, outputs, fmt=fmt, table_json=table_json) as staging:
         written, _ = _render_outputs(data, outputs, staging, fmt=fmt, dpi=dpi, table_json=table_json)
@@ -147,6 +168,11 @@ def render_outputs(data: dict, outputs: Sequence[_Output], output: str | Path, *
 
 
 def _render_outputs(data, outputs, output, *, fmt="pdf", dpi=150, table_json=False):
+    """Write to a staging directory and return paths plus console table entries.
+
+    Console entries hold the values already exported to files, so printing them
+    does not invoke the paper's callbacks again. This function does not publish.
+    """
     written = []
     tables = []
     macro_names = set()
@@ -195,7 +221,13 @@ def _render_outputs(data, outputs, output, *, fmt="pdf", dpi=150, table_json=Fal
 
 def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
                      output: Path, *, source: str | Path | None, title: str) -> list[Path]:
-    """Render selected registry outputs using the same callbacks in every format."""
+    """Render saved per-output selections to paper files, the terminal, and HTML.
+
+    Tables and macros are evaluated once for files and terminal output. The HTML
+    contains callbacks for browser execution. Reported errors raise RuntimeError
+    before publishing files; warnings allow publication. Diagnostics are printed
+    as they occur and summarized by level, with duplicate messages removed.
+    """
     registry = Registry()
     registry._outputs = list(artifacts)
     printed = set()

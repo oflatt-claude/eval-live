@@ -239,12 +239,15 @@ Open `eval_live/index.html` in a browser to load a JSON file via file picker.
 
 ## Architecture
 
-The viewer is a small state-driven app (no framework). There is one `state`
-object (`state.js`); events run reducers via `setState`, which re-renders:
+The viewer keeps saved rows in `state.data`, controls in `state.ui`, and the
+current report in `state.engine`. Saved rows stay unchanged for the lifetime of
+the page. Raw tables, computed tables, and diagnostics have independent controls,
+even when their display names match.
 
-```
-event -> setState(reducer) -> render(state)  [+ engine.tick(state)]
-```
+Filter edits update the controls and call `engine.tick(state)`. Collapsing a
+table, changing highlighting, and switching graph tabs only redraw the view.
+The engine also redraws when it publishes status or results: those updates use
+`setState(mutator, false)` so they cannot start another calculation.
 
 - **state.js** — the single state object plus *pure* derivations (row filtering,
   `rawFilteredData`, clause helpers) and reducers. No DOM, no async; unit-tested
@@ -252,14 +255,40 @@ event -> setState(reducer) -> render(state)  [+ engine.tick(state)]
 - **table-view.js** — `buildTableView` builds a table's DOM once, then
   `sync(state)` reconciles it (collapsed class, input values, checkbox state, row
   visibility). It stores no UI state, so collapse/filters survive re-renders.
-- **graph-engine.js** — `createEngine` recomputes a complete report from a
-  snapshot of the filters. Raw filters feed computed tables; their selected
-  output rows determine input narrowing; the narrowed inputs feed displayed
-  tables and graphs. Checkbox options come from the tables before narrowing.
-  Results are published together only if the snapshot still matches the current
-  filters. Pyodide calls are serialized, and typing is debounced.
+- **graph-engine.js** — `createEngine` evaluates Python callbacks from a snapshot
+  of the filters and publishes the complete report. It owns no DOM.
 - **eval-live.js** — `initEvalLive`: owns the state, wires reducers, and
   `render(state)` reconciles the whole page (graph bar, raw + computed tables).
+
+Within one calculation, filters flow in this order:
+
+```mermaid
+flowchart TD
+    saved[Saved rows] --> raw[Raw table filters]
+    raw --> tables[Computed tables before narrowing]
+    tables --> selected[Selected output rows]
+    tables --> options[Checkbox options]
+    selected --> callbacks[interactive_filter callbacks]
+    raw --> callbacks
+    callbacks --> effective[Allowed rows intersected with raw-filtered rows]
+    raw --> effective
+    effective --> outputs[Displayed tables, graphs and diagnostics]
+    effective --> visible[Visible raw rows]
+```
+
+Selections and checkbox options come from tables before narrowing. Using the
+displayed tables to select inputs would make a filter depend on its own results
+and could make choices disappear. Each output's static `requires` selection
+still limits its rendering data. A computed table without `interactive_filter`
+only filters its own displayed rows.
+
+Calculations run one at a time because they share a Python runtime. Each captures
+the filters before awaiting Python; it never reads later edits during that pass.
+If the filters change, the current calculation finishes and its results or errors
+are discarded. The newest queued selection is then evaluated. Tables, graphs,
+and diagnostics appear together only for the current selection, and computed
+values are hidden while that calculation is pending or has failed. Callbacks run
+again on every input change; the Python runtime remains loaded.
 
 ## Tests
 

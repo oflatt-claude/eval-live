@@ -1,18 +1,10 @@
-/* Part of eval-live -- the state core: ONE state object plus pure derivations,
-   reducers, and SQL-clause helpers. No DOM, no async, no shared mutable globals.
-   Everything here is plain JS that runs in node, so it is unit-tested directly
-   (see test/state.test.mjs).
-
-   The design: there is a single `state` object (built by makeState). The DOM
-   layer (table-view.js) and the Pyodide engine (graph-engine.js) READ derived
-   values from it and never keep their own copy of UI state -- which is why
-   collapse/filter/active-graph survive a re-render. Reducers mutate `state` in
-   place (its identity is stable; the view holds a reference); initEvalLive wraps
-   each reducer in setState() to trigger a render.
-
-   Loaded as a plain <script> (global function declarations, no ES modules):
-   js() concatenates all modules into one inline tag; index.html loads them as
-   separate <script src>. Depends on sql-filter.js (sqlMatchSet, clauseForColumn). */
+/* Viewer state, pure filtering helpers, and synchronous reducers.
+   state.data is fixed for the viewer's lifetime. state.ui holds current controls;
+   the engine copies these controls for each calculation and publishes derived
+   outputs in state.engine. Reducers change the live state and report whether it
+   changed; eval-live.js decides whether to redraw or request a calculation.
+   No DOM or asynchronous work belongs here. Loaded as a plain script after
+   sql-filter.js (sqlMatchSet and clauseForColumn); tested in test/state.test.mjs. */
 
 // ---- construction ---------------------------------------------------------
 
@@ -24,6 +16,10 @@ function makeTableUi(kind) {
   return { kind: kind, collapsed: false, sql: "", colFilters: {}, highlight: "lowest" };
 }
 
+/**
+ * Create viewer state for named row tables. Retains data as supplied; callers
+ * must not mutate it. Rejects whole numbers outside the browser's exact range.
+ */
 function makeState(data, projectName, graphScript, evalLivePy) {
   browserNumbers(data);
   const tables = {};
@@ -37,7 +33,7 @@ function makeState(data, projectName, graphScript, evalLivePy) {
     graphScript: graphScript || null,
     evalLivePy: evalLivePy || null,
     ui: {
-      tables: tables,        // tableName -> { kind, collapsed, sql, colFilters }
+      tables: tables,        // tableKey(name, kind) -> controls for that table
       activeGraph: null,     // selected graph name (null = first available)
     },
     engine: {
@@ -59,6 +55,8 @@ function makeState(data, projectName, graphScript, evalLivePy) {
   };
 }
 
+// Validate nested display values without coercion. Larger integer identifiers
+// must be strings; accepting a rounded number here would corrupt later filtering.
 function browserNumbers(value) {
   if (typeof value === "bigint" ||
       (typeof value === "number" && Number.isInteger(value) && !Number.isSafeInteger(value))) {
@@ -69,6 +67,7 @@ function browserNumbers(value) {
   }
 }
 
+// Raw, computed, and diagnostic tables may share a display name.
 function tableKey(name, kind = "raw") {
   return JSON.stringify([kind, name]);
 }
@@ -141,11 +140,8 @@ function visibleRows(rows, ui) {
   return visibleRowIndices(rows, columnsOf(rows), ui).map((i) => rows[i]);
 }
 
-// Raw data after applying each raw table's own filter ui. This is the engine
-// input that drives graphs + computed tables. It deliberately IGNORES
-// engine.narrowing (the computed->raw feedback) so there is no recompute cycle:
-// raw filters feed computed tables, computed filters feed raw display, and the
-// two never chase each other.
+// Apply each raw table's own controls, retaining empty tables. Input narrowing
+// is excluded here: these rows determine the computed selections that narrow it.
 function rawFilteredData(state) {
   const out = {};
   for (const name of Object.keys(state.data)) {
@@ -157,8 +153,9 @@ function rawFilteredData(state) {
   return out;
 }
 
-// Raw data after raw and computed-table filters, used by graphs and displayed
-// computed tables. Filter inputs come from computedUnfiltered to avoid cycles.
+// Intersect raw-filtered rows with the interactive filters' allowed rows.
+// An omitted table keeps its rows; an empty allowed list removes all of them.
+// Used for displayed tables and graphs; cannot reintroduce a raw-filtered row.
 function effectiveRawData(state) {
   const fd = rawFilteredData(state);
   const narrowing = state.engine.narrowing;
@@ -207,7 +204,8 @@ function distinctScalarValues(rows, col) {
   return [...distinct].sort();
 }
 
-// Object key order does not change a row's identity.
+// Identify JSON rows by their complete contents, independent of object key order.
+// Both graph inputs and visible raw rows use this equality when narrowing data.
 function rowKey(row) {
   function canonical(value) {
     if (Array.isArray(value)) return value.map(canonical);
