@@ -55,8 +55,9 @@ def check_messages(page):
     from eval_live.render import write_html
 
     data = {"measurements": [{"run_id": "a", "status": "timed-out", "value": None},
-                              {"run_id": "b", "status": "success", "value": 2}]}
-    selections = {output.id: {"data": ["a", "b"]} for output in diagnostics_report.reg._outputs}
+                              {"run_id": "b", "status": "success", "value": 2},
+                              {"run_id": "c", "status": "failure", "value": None}]}
+    selections = {output.id: {"data": ["a", "b", "c"]} for output in diagnostics_report.reg._outputs}
     with tempfile.TemporaryDirectory() as temporary:
         path = Path(temporary) / "messages.html"
         write_html(path, data, diagnostics_report.reg._outputs, selections,
@@ -64,19 +65,29 @@ def check_messages(page):
         page.goto(path.as_uri())
         warnings = page.locator(".computed-container .table-section").filter(
             has=page.locator(".table-title", has_text="Warnings"))
+        errors = page.locator(".computed-container .table-section").filter(
+            has=page.locator(".table-title", has_text="Errors"))
         page.wait_for_selector(".graph-display img", timeout=60000)
         warnings.wait_for(timeout=15000)
         assert warnings.locator("tbody tr").count() == 1
+        assert errors.locator("tbody tr").count() == 1
         assert page.locator(".raw-container .table-title", has_text="Warnings").count() == 0
         measurements = page.locator(".raw-container .table-section").filter(
             has=page.locator(".table-title", has_text="measurements"))
         measurements.locator(".sql-filter-input").fill("status = 'success'")
         warnings.wait_for(state="detached", timeout=15000)
+        errors.wait_for(state="detached", timeout=15000)
         page.get_by_text("Clear all filters", exact=True).click()
         warnings.wait_for(timeout=15000)
         assert warnings.locator("tbody tr").count() == 1
+        statuses = page.locator(".computed-container .table-section").filter(
+            has=page.locator(".table-title", has_text="Statuses"))
+        statuses.locator(".sql-filter-input").fill("status = 'success'")
+        warnings.wait_for(state="detached", timeout=15000)
+        errors.wait_for(state="detached", timeout=15000)
+        assert measurements.locator(".row-count").inner_text() == "(1/3 rows)"
         assert set(data) == {"measurements"}
-        print("Browser: computed warnings deduplicate, update with filtering, and leave raw data unchanged.")
+        print("Browser: warnings and errors deduplicate and follow raw and computed filters.")
 
 
 def check_filter_inputs(page):

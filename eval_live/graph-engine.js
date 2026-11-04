@@ -107,7 +107,6 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
     await pyodide.runPythonAsync(graphScript);
     const raw = rawFilteredData(snapshot);
     snapshot.engine.computedUnfiltered = await runTables(raw);
-    const initialErrors = (await runTables(raw, true)).filter((table) => table.name === "Errors");
     const filters = computedFilterInputs(snapshot);
     snapshot.engine.narrowing = filters.length ? await runNarrowing(filters, raw) : null;
     const data = effectiveRawData(snapshot);
@@ -115,11 +114,6 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
       ? await runTables(data) : snapshot.engine.computedUnfiltered;
     snapshot.engine.graphs = await runGraphs(data);
     const messages = await runTables(data, true);
-    for (const table of initialErrors) {
-      const current = messages.find((item) => item.name === table.name);
-      if (!current) { messages.push(table); continue; }
-      current.rows = [...new Map([...table.rows, ...current.rows].map((row) => [row.message, row])).values()];
-    }
     return {...snapshot.engine, messages, status: "ready", statusText: ""};
   }
 

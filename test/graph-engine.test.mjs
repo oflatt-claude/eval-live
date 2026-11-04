@@ -168,7 +168,7 @@ console.log("  ok  mid-flight changes discard both obsolete results and obsolete
     narrow: async data => ({...data, samples: data.samples.slice(1)}),
     messages: () => [
       {name: "Warnings", rows: tables === 1 ? [{message: "excluded input"}] : []},
-      {name: "Errors", rows: tables === 1 ? [{message: "earlier calculation failed"}] : []},
+      {name: "Errors", rows: tables === 1 ? [{message: "excluded failed input"}] : []},
     ],
   };
   const {ctx, state, engine} = setup({samples: rows}, hooks);
@@ -176,6 +176,6 @@ console.log("  ok  mid-flight changes discard both obsolete results and obsolete
   engine.tick(state);
   await ready(state);
   assert.equal(state.engine.messages[0].rows.length, 0, "warnings describe effective inputs");
-  assert.equal(state.engine.messages[1].rows[0].message, "earlier calculation failed");
-  console.log("  ok  warnings follow narrowed data while calculation errors cannot disappear");
+  assert.equal(state.engine.messages[1].rows.length, 0, "errors also describe effective inputs");
+  console.log("  ok  warnings and errors describe the final narrowed data");
 }
