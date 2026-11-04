@@ -1,0 +1,38 @@
+name: Checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[render,docs]'
+      - run: python -m unittest discover -s test -p 'test_*.py'
+      - run: python -m sphinx -W --keep-going -b html docs docs/_build/html
+      - run: python -m sphinx -W -b doctest docs docs/_build/doctest
+      - run: python demo/eval.py
+      - run: python demo/eval.py --dry-run
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node test/state.test.mjs
+      - run: node test/dom.test.mjs
+      - run: node test/graph-engine.test.mjs
+      - run: pip install -e '.[render]' playwright
+      - run: python -m playwright install --with-deps chromium
+      - run: python demo/eval.py
+      - run: python test/browser_smoke.py

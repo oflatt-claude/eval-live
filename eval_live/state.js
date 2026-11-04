@@ -50,8 +50,9 @@ function makeState(data, projectName, graphScript, evalLivePy) {
       //   keeps the data-flow acyclic.
       // computedTables: tables run on the effective (narrowed) data -- what the
       //   views actually DISPLAY, so one computed filter narrows them all.
-      computedUnfiltered: [], // [{name, rows, hasFilterSource}]
-      computedTables: [],     // [{name, rows, hasFilterSource}]
+      computedUnfiltered: [], // [{name, rows, hasInteractiveFilter}]
+      computedTables: [],     // [{name, rows, hasInteractiveFilter}]
+      messages: [],           // derived warnings/errors; never part of raw data
       narrowing: null,        // {tableName: rows[]} from computed->raw feedback, or null
     },
   };
@@ -141,12 +142,8 @@ function rawFilteredData(state) {
   return out;
 }
 
-// rawFilteredData further narrowed by the computed->raw feedback
-// (engine.narrowing). This drives the GRAPHS, so they reflect computed-table
-// filters as well as raw ones. It is deliberately NOT used for computed-table
-// rows: feeding the narrowing back into run_tables would make a computed table's
-// own filter change its own input (a recompute cycle). Graph images feed back
-// into nothing, so narrowing them is safe.
+// Raw data after raw and computed-table filters, used by graphs and displayed
+// computed tables. Filter inputs come from computedUnfiltered to avoid cycles.
 function effectiveRawData(state) {
   const fd = rawFilteredData(state);
   const narrowing = state.engine.narrowing;
@@ -164,7 +161,7 @@ function effectiveRawData(state) {
   return out;
 }
 
-// {name, filtered_rows} for every computed table that has a filter_source AND
+// {name, filtered_rows} for every computed table that has an interactive_filter AND
 // an active filter -- the input to apply_table_filters (the computed->raw
 // narrowing). The selection is taken from the UNFILTERED tables so it does not
 // depend on the narrowing (no cycle). Tables with no active filter are omitted,
@@ -172,7 +169,7 @@ function effectiveRawData(state) {
 function computedFilterInputs(state) {
   const out = [];
   for (const t of state.engine.computedUnfiltered) {
-    if (!t.hasFilterSource) continue;
+    if (!t.hasInteractiveFilter) continue;
     const ui = state.ui.tables[t.name];
     if (!ui) continue;
     const active = (ui.sql && ui.sql.trim()) || Object.keys(ui.colFilters).length > 0;

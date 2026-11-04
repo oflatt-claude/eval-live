@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eval-live"
-version = "0.1.0"
-description = "Interactive HTML tables and Pyodide-powered graphs for evaluation results"
+version = "0.2.0"
+description = "Reproducible paper evaluations with commit-aware caching and interactive reports"
 requires-python = ">=3.10"
 # rich powers the terminal renderer (Registry.render_to_console); lightweight
 # and always available for simplicity.
@@ -16,6 +16,10 @@ dependencies = ["rich>=13.7"]
 # matplotlib. The browser viewer uses Pyodide's own matplotlib. Install with
 # `pip install -e .[render]` to use the local renderer.
 render = ["matplotlib>=3.5"]
+docs = ["sphinx>=7,<10"]
+
+[tool.setuptools.packages.find]
+include = ["eval_live*"]
 
 [tool.setuptools.package-data]
 eval_live = ["*.js", "*.css", "*.py", "*.html", "vendor/*.js"]

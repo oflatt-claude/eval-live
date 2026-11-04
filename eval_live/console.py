@@ -40,7 +40,7 @@ def _rich_style(style):
 
 
 def render(tables, data, console=None, names=None):
-    """Render registered ``(name, fn, filter_source, caption)`` tables to a rich
+    """Render registered ``(name, fn, interactive_filter, caption)`` tables to a rich
     console. Columns and headers are the row keys, in first-seen order; styled
     cells are colored via their ``style`` spec. Returns the console used.
 
