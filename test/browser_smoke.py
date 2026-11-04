@@ -24,7 +24,7 @@ def main():
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
-            page.goto((ROOT / "demo/out/paper/index.html").as_uri())
+            page.goto(Path(os.environ.get("EVAL_LIVE_REPORT", ROOT / "demo/out/paper/index.html")).resolve().as_uri())
             page.wait_for_selector(".graph-display img", timeout=60000)
             summary = page.locator(".computed-container .table-section").filter(
                 has=page.locator(".table-title", has_text="Summary"))
@@ -35,7 +35,7 @@ def main():
             page.wait_for_function("""() => Array.from(document.querySelectorAll('.raw-container .table-section'))
                 .find(el => el.querySelector('.table-title').textContent === 'measurements')
                 .querySelector('.row-count').textContent.includes('6/27')""", timeout=15000)
-            page.wait_for_function("old => document.querySelector('.graph-display img').src !== old",
+            page.wait_for_function("old => document.querySelector('.graph-display img')?.src && document.querySelector('.graph-display img').src !== old",
                                    arg=previous, timeout=15000)
             assert not errors, errors
             page.get_by_text("Clear all filters", exact=True).click()
@@ -44,6 +44,7 @@ def main():
                 .querySelectorAll('tbody tr').length === 27""", timeout=15000)
             print("Browser: both graphs, summary, and filter propagation across commits passed.")
             check_messages(page)
+            check_filter_inputs(page)
             assert not errors, errors
         finally:
             browser.close()
@@ -76,6 +77,47 @@ def check_messages(page):
         assert warnings.locator("tbody tr").count() == 1
         assert set(data) == {"measurements"}
         print("Browser: computed warnings deduplicate, update with filtering, and leave raw data unchanged.")
+
+
+def check_filter_inputs(page):
+    import filter_report
+    import eval_live
+    from eval_live.render import write_html
+
+    data = {"samples": [{"run_id": "a", "id": "a", "value": 1},
+                        {"run_id": "b", "id": "b", "value": 2}]}
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "filters.html"
+        selections = {output.id: {"data": ["a", "b"]} for output in filter_report.reg._outputs}
+        write_html(path, data, filter_report.reg._outputs, selections,
+                   source=Path(filter_report.__file__))
+        page.goto(path.as_uri())
+        page.wait_for_selector(".graph-display img", timeout=120000)
+        raw = page.locator(".raw-container .table-section").filter(
+            has=page.locator(".table-title", has_text="samples"))
+        computed = page.locator(".computed-container .table-section").filter(
+            has=page.locator(".table-title", has_text="samples"))
+        raw.locator(".sql-filter-input").fill("id = 'b'")
+        computed.locator(".sql-filter-input").fill("[value] = 'G'")
+        page.wait_for_selector(".graph-display img", timeout=15000)
+        assert raw.locator(".row-count").inner_text() == "(1/2 rows)"
+        assert raw.locator("tbody tr:visible").count() == 1
+        assert "b" in raw.locator("tbody tr:visible").inner_text()
+        assert computed.locator(".sql-filter-input").input_value() == "[value] = 'G'"
+        page.get_by_text("Clear all filters", exact=True).click()
+        page.wait_for_selector(".graph-display img", timeout=15000)
+        assert raw.locator("tbody tr:visible").count() == 2
+        print("Browser: raw input filters, independent table names, and reordered row keys passed.")
+
+        reg = eval_live.Registry()
+        reg.table("Unsafe", filter_report.unsafe_number)
+        write_html(path, data, reg._outputs, {reg._outputs[0].id: {"data": ["a", "b"]}},
+                   source=Path(filter_report.__file__))
+        page.goto(path.as_uri())
+        page.wait_for_function("() => document.querySelector('.graph-status').textContent.includes('exact range')",
+                               timeout=120000)
+        assert page.locator(".computed-container tbody tr:visible").count() == 0
+        print("Browser: oversized computed integers fail explicitly.")
 
 
 if __name__ == "__main__":

@@ -100,7 +100,7 @@ test("typing in the SQL box filters rows and updates the count", () => {
   const sql = section.find("sql-filter-input");
   sql.value = "flowlog";          // bare word -> substring fallback (no AlaSQL here)
   sql.dispatch("input");
-  assert.equal(api.getState().ui.tables.errors.sql, "flowlog");
+  assert.equal(api.getState().ui.tables[ctx.tableKey("errors")].sql, "flowlog");
   assert.equal(visibleRowCount(section), 1);
   assert.equal(section.find("row-count").textContent, "(1/3 rows)");
 });
@@ -125,8 +125,8 @@ test("unchecking a checkbox rewrites the SQL box (round-trips through state)", (
   assert.equal(box.checked, true);
   box.checked = false;
   box.dispatch("change");
-  const sql = api.getState().ui.tables.errors.sql;
-  assert.match(sql, /backend (=|IN)/);
+  const sql = api.getState().ui.tables[ctx.tableKey("errors")].sql;
+  assert.match(sql, /\[backend\] (=|IN)/);
   assert.equal(section.find("sql-filter-input").value, sql);
   // a re-render re-derives the checkbox from sql: it stays unchecked.
   api.render();
@@ -139,7 +139,7 @@ test("Clear all filters resets sql + colFilters and shows every row", () => {
   sql.value = "feldera"; sql.dispatch("input");
   assert.equal(visibleRowCount(section), 2);
   root.find("clear-filters-btn").click();
-  assert.equal(api.getState().ui.tables.errors.sql, "");
+  assert.equal(api.getState().ui.tables[ctx.tableKey("errors")].sql, "");
   assert.equal(visibleRowCount(section), 3);
   assert.equal(sql.value, "");
 });

@@ -3,11 +3,10 @@
    two browser modules inside a node:vm context (where their top-level function
    declarations become context globals) and assert against them directly.
 
-   The real AlaSQL evaluation path needs a browser-y global and is exercised
-   manually; here `alasql` is absent, so sqlMatchSet() returns null and SQL text
-   falls back to substring matching -- which is itself a documented behavior we
-   assert on. Run: `node test/state.test.mjs`. */
+   Most cases omit AlaSQL to exercise plain text fallback; SQL-specific cases
+   load the bundled engine. Run: `node test/state.test.mjs`. */
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import vm from "node:vm";
 import assert from "node:assert/strict";
 
@@ -65,18 +64,19 @@ test("cellText matches historic rendering (null -> 'null', undefined -> '')", ()
   assert.equal(ctx.cellText(42), "42");
 });
 
-test("rawFilteredData applies each raw table's ui and skips non-raw/empty", () => {
+test("rawFilteredData applies raw filters and preserves empty tables", () => {
   const state = ctx.makeState({ runs: ROWS, empty: [] }, "P");
   ctx.setColFilter(state, "runs", "backend", "feldera");
   const fd = ctx.rawFilteredData(state);
-  eq(Object.keys(fd), ["runs"]);
+  eq(Object.keys(fd), ["runs", "empty"]);
+  eq(fd.empty, []);
   assert.equal(fd.runs.length, 2);
 });
 
 test("reducers report change and are idempotent", () => {
   const state = ctx.makeState({ runs: ROWS });
   assert.equal(ctx.toggleCollapsed(state, "runs"), true);
-  assert.equal(state.ui.tables.runs.collapsed, true);
+  assert.equal(state.ui.tables[ctx.tableKey("runs")].collapsed, true);
   assert.equal(ctx.setSql(state, "runs", "x"), true);
   assert.equal(ctx.setSql(state, "runs", "x"), false);      // no-op -> false
   assert.equal(ctx.setColFilter(state, "runs", "mode", ""), false); // unset stays unset
@@ -88,17 +88,17 @@ test("clearAllFilters resets sql + colFilters across all tables", () => {
   ctx.setSql(state, "runs", "feldera");
   ctx.setColFilter(state, "runs", "mode", "proofs");
   assert.equal(ctx.clearAllFilters(state), true);
-  assert.equal(state.ui.tables.runs.sql, "");
-  eq(state.ui.tables.runs.colFilters, {});
+  assert.equal(state.ui.tables[ctx.tableKey("runs")].sql, "");
+  eq(state.ui.tables[ctx.tableKey("runs")].colFilters, {});
   assert.equal(ctx.clearAllFilters(state), false);          // already clear
 });
 
 test("columnClauseFor: all checked -> '', subset -> = / IN", () => {
   const all = ["feldera", "flowlog"];
   assert.equal(ctx.columnClauseFor("backend", all, all), "");
-  assert.equal(ctx.columnClauseFor("backend", ["feldera"], all), "backend = 'feldera'");
+  assert.equal(ctx.columnClauseFor("backend", ["feldera"], all), "[backend] = 'feldera'");
   assert.equal(ctx.columnClauseFor("backend", ["feldera", "flowlog"], ["a", "b", "c"]),
-    "backend IN ('feldera', 'flowlog')");
+    "[backend] IN ('feldera', 'flowlog')");
 });
 
 test("setColumnClause adds, replaces, and removes a column's clause", () => {
@@ -149,14 +149,14 @@ test("computedFilterInputs: from UNFILTERED tables, only when filter is active",
   eq(ctx.computedFilterInputs(state), []);
   // a filter on the interactive_filter table -> its selected rows are emitted
   ctx.ensureTableUi(state, "summary", "computed");
-  ctx.setColFilter(state, "summary", "backend", "feldera");
+  ctx.setColFilter(state, "summary", "backend", "feldera", "computed");
   const cf = ctx.computedFilterInputs(state);
   eq(cf.length, 1);
   eq(cf[0].name, "summary");
   eq(cf[0].filtered_rows.length, 2);
   // a filter on a table WITHOUT an interactive_filter is ignored
   ctx.ensureTableUi(state, "nofs", "computed");
-  ctx.setColFilter(state, "nofs", "backend", "feldera");
+  ctx.setColFilter(state, "nofs", "backend", "feldera", "computed");
   eq(ctx.computedFilterInputs(state).length, 1);
 });
 
@@ -182,9 +182,9 @@ test("bestNumericCols: lowest (default), highest, none, ties, >= 2 numbers", () 
 
 test("setHighlight reducer (default lowest, idempotent)", () => {
   const state = ctx.makeState({ runs: ROWS });
-  assert.equal(state.ui.tables.runs.highlight, "lowest");
+  assert.equal(state.ui.tables[ctx.tableKey("runs")].highlight, "lowest");
   assert.equal(ctx.setHighlight(state, "runs", "highest"), true);
-  assert.equal(state.ui.tables.runs.highlight, "highest");
+  assert.equal(state.ui.tables[ctx.tableKey("runs")].highlight, "highest");
   assert.equal(ctx.setHighlight(state, "runs", "highest"), false);
 });
 
@@ -192,10 +192,10 @@ test("toggleCheckbox edits the table's SQL box (clause for a column)", () => {
   const state = ctx.makeState({ runs: ROWS });
   // uncheck flowlog -> only feldera selected -> "backend = 'feldera'"
   ctx.toggleCheckbox(state, "runs", "backend", ["feldera"], ["feldera", "flowlog"]);
-  assert.equal(state.ui.tables.runs.sql, "backend = 'feldera'");
+  assert.equal(state.ui.tables[ctx.tableKey("runs")].sql, "[backend] = 'feldera'");
   // re-check both -> clause removed
   ctx.toggleCheckbox(state, "runs", "backend", ["feldera", "flowlog"], ["feldera", "flowlog"]);
-  assert.equal(state.ui.tables.runs.sql, "");
+  assert.equal(state.ui.tables[ctx.tableKey("runs")].sql, "");
 });
 
 test("resolveActiveGraph: chosen if present, else first, else null", () => {
@@ -213,6 +213,37 @@ test("narrowedKeySet / rowKey identify rows by content", () => {
   const set = ctx.narrowedKeySet([ROWS[0], ROWS[2]]);
   assert.equal(set.has(ctx.rowKey(ROWS[0])), true);
   assert.equal(set.has(ctx.rowKey(ROWS[1])), false);
+});
+
+test("narrowing ignores dictionary insertion order", () => {
+  const state = ctx.makeState({samples: [{id: "a", value: 1}]});
+  state.engine.narrowing = {samples: [{value: 1, id: "a"}]};
+  eq(ctx.effectiveRawData(state).samples, state.data.samples);
+});
+
+test("raw, computed, and diagnostic tables have independent filters", () => {
+  const state = ctx.makeState({Summary: [{value: 1}, {value: 2}]});
+  ctx.setColFilter(state, "Summary", "value", "1.5", "computed");
+  ctx.setColFilter(state, "Summary", "value", "warning", "message");
+  eq(ctx.rawFilteredData(state).Summary, state.data.Summary);
+  ctx.setColFilter(state, "Summary", "value", "2", "raw");
+  eq(ctx.rawFilteredData(state).Summary, [{value: 2}]);
+  assert.equal(ctx.ensureTableUi(state, "Summary", "computed").colFilters.value, "1.5");
+});
+
+test("quoted checkbox columns work with reserved names and spaces", () => {
+  ctx.alasql = createRequire(import.meta.url)("../eval_live/vendor/alasql.min.js");
+  for (const col of ["value", "group", "time (ms)"]) {
+    const sql = ctx.columnClauseFor(col, ["a"], ["a", "b"]);
+    eq(ctx.extractColumnValues(sql, col), ["a"]);
+    assert.equal(ctx.removeColumnClause(sql, col), "");
+    eq([...ctx.sqlMatchSet(sql, [{[col]: "a"}, {[col]: "b"}])], [0]);
+  }
+});
+
+test("unsafe browser integers fail rather than round silently", () => {
+  assert.throws(() => ctx.makeState({samples: [{value: 2**53}]}), /exact range/);
+  assert.equal(ctx.makeState({samples: [{value: "9007199254740993"}]}).data.samples[0].value, "9007199254740993");
 });
 
 console.log(`\n${passed} tests passed`);

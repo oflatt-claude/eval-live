@@ -15,14 +15,12 @@
    rows are never rebuilt, so it persists naturally without bloating state. */
 
 /**
- * @param {string} name        table name (key into state.ui.tables)
+ * @param {string} name         displayed table name
  * @param {Array}  rows         the table's rows (fixed for the life of the view)
- * @param {string} kind         "raw" | "computed"
+ * @param {string} kind         "raw" | "computed" | "message"
  * @param {boolean} filterable  show the filter toolbar + per-column inputs
  * @param {string} [description] clarifying subtitle
- * @param {Object} handlers     { onToggleCollapse(name), onSql(name,val),
- *                                onColFilter(name,col,val), onHighlight(name,mode),
- *                                onCheckbox(name,col,checkedValues,allValues) }
+ * @param {Object} handlers     callbacks receive name, action arguments, then kind
  * @param {Array} [optionRows]   rows the checkbox dropdowns enumerate (the
  *                               UNFILTERED rows, so options don't vanish as the
  *                               displayed `rows` narrow). Defaults to `rows`.
@@ -51,7 +49,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
   const rowCount = document.createElement("span");
   rowCount.className = "row-count";
   heading.appendChild(rowCount);
-  heading.addEventListener("click", () => handlers.onToggleCollapse(name));
+  heading.addEventListener("click", () => handlers.onToggleCollapse(name, kind));
   section.appendChild(heading);
 
   if (description) {
@@ -74,7 +72,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     opt.textContent = text;
     hlSelect.appendChild(opt);
   }
-  hlSelect.addEventListener("change", () => handlers.onHighlight(name, hlSelect.value));
+  hlSelect.addEventListener("change", () => handlers.onHighlight(name, hlSelect.value, kind));
   hlLabel.appendChild(hlSelect);
   controls.appendChild(hlLabel);
   section.appendChild(controls);
@@ -93,7 +91,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     sqlInput.className = "sql-filter-input";
     sqlInput.placeholder =
       "SQL filter, e.g.  backend IN ('feldera','flowlog') AND mode = 'proofs'   (plain text = substring match)";
-    sqlInput.addEventListener("input", () => handlers.onSql(name, sqlInput.value));
+    sqlInput.addEventListener("input", () => handlers.onSql(name, sqlInput.value, kind));
     sqlWrap.appendChild(sqlInput);
     const hint = document.createElement("span");
     hint.className = "sql-filter-hint";
@@ -114,7 +112,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     dropdowns.className = "checkbox-dropdowns";
     for (const col of cols) {
       const values = distinctScalarValues(optionRows, col);
-      if (values === null) continue;         // non-scalar column; no dropdown
+      if (values === null || col.includes("]")) continue;         // non-scalar column; no dropdown
       if (values.length >= 30) continue;     // too many to checkbox; use typed SQL
 
       const details = document.createElement("details");
@@ -141,7 +139,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
         boxes.push(box);
         cb.addEventListener("change", () => {
           const checked = boxes.filter((b) => b.cb.checked).map((b) => b.value);
-          handlers.onCheckbox(name, col, checked, values);
+          handlers.onCheckbox(name, col, checked, values, kind);
         });
       }
       details.appendChild(list);
@@ -180,7 +178,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
       input.type = "text";
       input.className = "filter-input";
       input.placeholder = "filter...";
-      input.addEventListener("input", () => handlers.onColFilter(name, col, input.value));
+      input.addEventListener("input", () => handlers.onColFilter(name, col, input.value, kind));
       colInputs[col] = input;
       th.appendChild(input);
       filterRow.appendChild(th);
@@ -236,7 +234,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
   }
 
   function sync(state) {
-    const ui = state.ui.tables[name] || makeTableUi(kind);
+    const ui = state.ui.tables[tableKey(name, kind)] || makeTableUi(kind);
 
     section.classList.toggle("collapsed", !!ui.collapsed);
 
@@ -263,11 +261,13 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     const idxs = visibleRowIndices(rows, cols, ui);
     let allowed = null;
     if (kind === "raw" && state.engine.narrowing && state.engine.narrowing[name]) {
-      allowed = new Set(state.engine.narrowing[name].map((r) => JSON.stringify(r)));
+      allowed = narrowedKeySet(state.engine.narrowing[name]);
     }
     const shown = new Array(rows.length).fill(false);
+    const pending = kind !== "raw" && state.graphScript && state.engine.status !== "ready";
     for (const i of idxs) {
-      if (allowed && !allowed.has(JSON.stringify(rows[i]))) continue;
+      if (pending) continue;
+      if (allowed && !allowed.has(rowKey(rows[i]))) continue;
       shown[i] = true;
     }
     const mode = ui.highlight || "lowest";
@@ -280,7 +280,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
       const best = bestNumericCols(rows[i], cols, mode);
       for (const col of cols) tds[col].classList.toggle("cell-best", best.has(col));
     }
-    rowCount.textContent = visible === rows.length
+    rowCount.textContent = pending ? (state.engine.status === "error" ? "(unavailable)" : "(updating)") : visible === rows.length
       ? `(${rows.length} rows)`
       : `(${visible}/${rows.length} rows)`;
   }

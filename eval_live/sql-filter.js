@@ -63,6 +63,6 @@ function sqlQuote(v) {
 // (or all-checked, handled by caller) means "no constraint" -> "".
 function clauseForColumn(col, checkedValues) {
   if (checkedValues.length === 0) return "";
-  if (checkedValues.length === 1) return `${col} = ${sqlQuote(checkedValues[0])}`;
-  return `${col} IN (${checkedValues.map(sqlQuote).join(", ")})`;
+  if (checkedValues.length === 1) return `[${col}] = ${sqlQuote(checkedValues[0])}`;
+  return `[${col}] IN (${checkedValues.map(sqlQuote).join(", ")})`;
 }

@@ -158,6 +158,33 @@ def broken_figure(data):
     raise ValueError("invalid figure input")
 
 
+RENDER_CALLS = []
+
+
+def counted_table(data):
+    RENDER_CALLS.append("table")
+    return [{"calls": len(RENDER_CALLS)}]
+
+
+def transient_failure(data):
+    RENDER_CALLS.append("failure")
+    if len(RENDER_CALLS) == 1:
+        raise ValueError("first calculation failed")
+    return [{"calls": len(RENDER_CALLS)}]
+
+
+def omitted_figure(data):
+    return None
+
+
+def interrupted_figure(data):
+    raise KeyboardInterrupt
+
+
+def large_measurement(context):
+    return {"measurements": [{"value": 2**53 + 1}]}
+
+
 class EvaluationTests(unittest.TestCase):
     def setUp(self):
         CALLS.clear()
@@ -404,8 +431,8 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(output.count("Results need review"), 2)
         self.assertNotIn("Some values are missing", self.data.read_text())
         self.assertNotIn("Results need review", self.data.read_text())
-        self.assertTrue((self.output / "first.tex").exists())
-        self.assertTrue((self.output / "second.tex").exists())
+        self.assertFalse((self.output / "first.tex").exists())
+        self.assertFalse((self.output / "second.tex").exists())
         saved_rows = self.stored()["measurements"]
         with redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
             self.run_eval(evaluation, render=True, render_only=True)
@@ -431,8 +458,108 @@ class EvaluationTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()) as captured, self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
             self.run_eval(self.evaluation(registry=reg), render=True)
         self.assertIn("ERROR: Broken: invalid figure input", captured.getvalue())
-        self.assertTrue((self.output / "working.tex").exists())
+        self.assertFalse((self.output / "working.tex").exists())
         self.assertEqual(len(self.stored()["measurements"]), 1)
+
+    def test_replay_rejects_incompatible_or_missing_benchmark_version(self):
+        reg = self.evaluation()
+        original = self.run_eval(reg, render=True)
+        reg._benchmarks["read"]["benchmark"]["version"] = "seconds"
+        with self.assertRaisesRegex(ValueError, "saved data version"):
+            self.run_eval(reg, render=True, render_only=True)
+        self.assertEqual(self.stored()["eval_invocations"][-1]["invocation_id"], original.invocation_id)
+        del reg._benchmarks["read"]
+        with self.assertRaisesRegex(ValueError, "saved data version"):
+            self.run_eval(reg, render=True, render_only=True)
+
+    def test_table_is_evaluated_once_for_files_and_console_on_every_run(self):
+        RENDER_CALLS.clear()
+        reg = eval_live.Registry()
+        reg.table("Counted", counted_table, id="counted")
+        for expected in (1, 2):
+            self.run_eval(reg, render=True)
+            self.assertEqual(len(RENDER_CALLS), expected)
+            self.assertIn(str(expected), (self.output / "counted.tex").read_text())
+
+    def test_transient_render_error_cannot_be_erased_by_console_output(self):
+        RENDER_CALLS.clear()
+        reg = eval_live.Registry()
+        reg.table("Flaky", transient_failure, id="flaky")
+        with redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
+            self.run_eval(reg, render=True)
+        self.assertEqual(len(RENDER_CALLS), 1)
+        self.assertEqual(self.stored()["eval_invocations"][-1]["status"], "failure")
+        self.assertFalse((self.output / "flaky.tex").exists())
+        self.assertFalse((self.output / "index.html").exists())
+
+    def test_omitted_or_removed_outputs_never_leave_old_files(self):
+        reg = self.evaluation()
+        reg.graph("Plot", figure, id="plot")
+        self.run_eval(reg, render=True)
+        self.assertTrue((self.output / "plot.pdf").exists())
+        (self.output / "notes.txt").write_text("keep")
+        reg = self.evaluation()
+        reg.graph("Plot", omitted_figure, id="plot")
+        self.run_eval(reg, render=True)
+        self.assertFalse((self.output / "plot.pdf").exists())
+        self.run_eval(reg, render=True, only=["plot"])
+        self.assertFalse((self.output / "values.tex").exists())
+        self.assertEqual((self.output / "notes.txt").read_text(), "keep")
+        self.assertTrue(self.data.exists())
+
+    def test_dry_run_preserves_outputs_and_collection_interrupt_removes_them(self):
+        reg = self.evaluation()
+        self.run_eval(reg, render=True)
+        before = {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()}
+        self.run_eval(reg, dry_run=True)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()})
+        with patch("eval_live.planning._Runner._collect", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.run_eval(reg, render=True, force=True)
+        self.assertFalse((self.output / "values.tex").exists())
+        self.assertFalse((self.output / "index.html").exists())
+        self.assertTrue(self.data.exists())
+
+    def test_interrupt_during_render_or_publication_removes_all_artifacts(self):
+        for during_publish in (False, True):
+            reg = self.evaluation()
+            reg.graph("Plot", figure, id="plot")
+            self.run_eval(reg, render=True)
+            if during_publish:
+                replace = Path.replace
+                def interrupt(path, target):
+                    if path.name == "plot.pdf":
+                        raise KeyboardInterrupt
+                    return replace(path, target)
+                with patch.object(Path, "replace", interrupt), self.assertRaises(KeyboardInterrupt):
+                    self.run_eval(reg, render=True)
+            else:
+                reg = self.evaluation()
+                reg.graph("Plot", interrupted_figure, id="plot")
+                with self.assertRaises(KeyboardInterrupt):
+                    self.run_eval(reg, render=True)
+            self.assertEqual(list(self.output.glob("*.pdf")), [])
+            self.assertEqual(list(self.output.glob("*.tex")), [])
+            self.assertFalse((self.output / "index.html").exists())
+            self.assertTrue(self.data.exists())
+
+    def test_browser_rejects_unsafe_integers_without_corrupting_saved_data(self):
+        from eval_live.render import write_html
+        reg = self.evaluation()
+        self.run_eval(reg)
+        for value in (2**53, -(2**53), 2**53 + 1):
+            with self.assertRaisesRegex(ValueError, "browser's exact range"):
+                write_html(self.output / "large.html", {"samples": [{"value": value}]},
+                           reg._outputs, {"values": {"data": []}})
+        self.assertFalse((self.output / "large.html").exists())
+        for value in (2**53 - 1, str(2**53 + 1)):
+            write_html(self.output / "large.html", {"samples": [{"value": value}]},
+                       reg._outputs, {"values": {"data": []}})
+        reg._benchmarks["read"]["benchmark"]["run"] = large_measurement
+        with self.assertRaisesRegex(ValueError, "browser's exact range"):
+            self.run_eval(reg, render=True)
+        self.assertEqual(self.stored()["measurements"][-1]["value"], 2**53 + 1)
+        self.assertFalse((self.output / "values.tex").exists())
+        self.assertFalse((self.output / "index.html").exists())
 
     def test_cache_hits_do_not_collect_or_checkout(self):
         first = self.run_eval()

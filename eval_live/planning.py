@@ -19,7 +19,7 @@ import uuid
 from .eval_live import Registry, _Output
 from .benchmarks import Benchmark, ProcessError, RunContext, callable_identity, file_digest
 from .cli import CONTROL_ARGUMENTS
-from .render import render_artifacts
+from .render import discard_outputs, render_artifacts
 from .store import Store, digest, parameter_rows, parameters, validate_tables
 from .targets import Target, script_revision
 from ._workers import Outcome, Worker, completed, measure
@@ -472,6 +472,7 @@ class _Runner:
         elif not any(row["invocation_id"] == saved for row in store.data["eval_invocations"]):
             raise ValueError(f"unknown saved invocation: {saved}")
         selections = {}
+        runs = {row["run_id"]: row for row in store.data["eval_runs"]}
         for artifact in artifacts:
             rows = [row for row in store.data["eval_selections"]
                     if row["invocation_id"] == saved and row["artifact_id"] == artifact.id]
@@ -481,6 +482,15 @@ class _Runner:
                 raise ValueError(f"saved invocation is missing requirements for {artifact.id}")
             selections[artifact.id] = {name: [row["run_id"] for row in sorted(rows, key=lambda r: r["position"])
                                             if row["requirement"] == name] for name in artifact.requires}
+            for row in rows:
+                run = runs[row["run_id"]]
+                benchmark = self.benchmarks.get(run["benchmark"])
+                if benchmark is None or benchmark.version != run["data_version"]:
+                    raise ValueError(
+                        f"saved data version for {run['benchmark']!r} is {run['data_version']!r}; "
+                        "declare the matching version to replay it, or run without --render-only to collect current data"
+                    )
+        discard_outputs(Path(options["output"]).expanduser(), self.artifacts)
         invocation = self._invocation(store, options, argv)
         invocation["source_invocation"] = saved
         invocation["collection_complete"] = True
@@ -527,6 +537,7 @@ class _Runner:
                 return self._render_only(store, options, tokens)
             plan = self._plan(options, store)
             print(plan.describe())
+            discard_outputs(Path(options["output"]).expanduser(), self.artifacts)
             reused = plan.reused
             invocation = self._invocation(store, options, tokens)
             try:

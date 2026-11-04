@@ -295,6 +295,7 @@ class Registry:
     def graph(self, name, fn=None, *, requires=None, id=None):
         """Register ``fn(data) -> matplotlib.figure.Figure``.
 
+        Return ``None`` to omit a figure, including its previous generated file.
         ``name`` is the display title. ``requires(treatments)`` selects the
         treatments needed by this output before collection. Omit it to select
         the whole catalog. Interactive filtering never changes this selection.
@@ -357,6 +358,9 @@ class Registry:
         Every requested treatment has measured or explicit error rows. Ctrl+C
         stops collection and rendering. Figure warnings/errors are computed,
         deduplicated, and never stored; reporting errors fail after rendering.
+        Only measurement data is cached. Generated files replace the previous
+        report after successful rendering; errors or Ctrl+C remove those files
+        while preserving saved data. Use separate directories to retain reports.
         """
         from .planning import _Runner
         return _Runner(self).run(args=args, argv=argv)
@@ -424,6 +428,8 @@ class Registry:
         and LaTeX. Macros produce
         LaTeX. Return the written paths. No benchmarks run: ``requires`` is used
         by :meth:`run`, which stores data in one JSON file without table sidecars.
+        Replace the previous generated outputs in this directory. A rendering
+        exception removes those outputs; unrelated files are preserved.
         """
         from .render import render_outputs
         return [str(path) for path in render_outputs(data, self._outputs, outdir,

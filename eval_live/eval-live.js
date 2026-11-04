@@ -1,17 +1,5 @@
-/* Part of eval-live -- the entry point and owner of the single state object.
-   Architecture (see state.js for the data shape):
-
-     event -> setState(reducer) -> render(state) [+ engine.tick(state)]
-
-   There is ONE `state`. Reducers mutate it; setState() re-renders and nudges the
-   Pyodide engine. render(state) reconciles a persistent DOM skeleton to the
-   current state -- it builds structure once (graph section, table views, clear
-   button) and is otherwise idempotent: table views toggle row visibility rather
-   than rebuilding, so render is cheap to call on every keystroke. The expensive,
-   async work (graphs, computed-table rows, narrowing) lives behind the engine's
-   memoized effects, which write their results back via setState.
-
-   Loaded as a plain <script>; depends on state.js, table-view.js, graph-engine.js. */
+/* Own the viewer state. Input changes request a complete calculation; engine
+   results and presentation controls only redraw the page. */
 
 // Clarifying subtitles for known raw result tables.
 const TABLE_DESCRIPTIONS = {
@@ -44,19 +32,19 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
   let engine = null;   // created at the end, once the DOM skeleton exists
 
   // --- reducer dispatch ---------------------------------------------------
-  function setState(mutator) {
+  function setState(mutator, recompute = true) {
     const changed = mutator(state);
     if (changed === false) return;          // reducer reported a no-op
     render();
-    if (engine) engine.tick(state);
+    if (engine && recompute) engine.tick(state);
   }
 
   const handlers = {
-    onToggleCollapse: (n) => setState((s) => toggleCollapsed(s, n)),
-    onSql: (n, val) => setState((s) => setSql(s, n, val)),
-    onColFilter: (n, col, val) => setState((s) => setColFilter(s, n, col, val)),
-    onHighlight: (n, mode) => setState((s) => setHighlight(s, n, mode)),
-    onCheckbox: (n, col, checked, all) => setState((s) => toggleCheckbox(s, n, col, checked, all)),
+    onToggleCollapse: (n, kind) => setState((s) => toggleCollapsed(s, n, kind), false),
+    onSql: (n, val, kind) => setState((s) => setSql(s, n, val, kind)),
+    onColFilter: (n, col, val, kind) => setState((s) => setColFilter(s, n, col, val, kind)),
+    onHighlight: (n, mode, kind) => setState((s) => setHighlight(s, n, mode, kind), false),
+    onCheckbox: (n, col, checked, all, kind) => setState((s) => toggleCheckbox(s, n, col, checked, all, kind)),
   };
 
   // --- persistent DOM skeleton (built once) -------------------------------
@@ -127,13 +115,14 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
     computedContainer.innerHTML = "";
     computedViews = [];
     for (const t of [...state.engine.computedTables, ...state.engine.messages]) {
-      if (!t.rows || t.rows.length === 0) continue;
-      ensureTableUi(state, t.name, "computed");     // persist ui across rebuilds
+      const kind = state.engine.messages.includes(t) ? "message" : "computed";
+      const unfiltered = state.engine.computedUnfiltered.find((u) => u.name === t.name);
+      const optionRows = kind === "computed" && unfiltered ? unfiltered.rows : t.rows;
+      if (!optionRows || optionRows.length === 0) continue;
+      ensureTableUi(state, t.name, kind);     // persist ui across rebuilds
       // Checkbox options come from the UNFILTERED version of this table, so
       // unchecking a value doesn't make it disappear as the display narrows.
-      const unfiltered = state.engine.computedUnfiltered.find((u) => u.name === t.name);
-      const optionRows = unfiltered ? unfiltered.rows : t.rows;
-      const view = buildTableView(t.name, t.rows, "computed", t.hasInteractiveFilter,
+      const view = buildTableView(t.name, t.rows, kind, true,
                                   t.caption, handlers, optionRows);
       computedViews.push(view);
       computedContainer.appendChild(view.section);
@@ -155,7 +144,7 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
         const btn = document.createElement("button");
         btn.className = "graph-btn";
         btn.textContent = g.name;
-        btn.addEventListener("click", () => setState((s) => setActiveGraph(s, g.name)));
+        btn.addEventListener("click", () => setState((s) => setActiveGraph(s, g.name), false));
         graphBar.appendChild(btn);
       }
     }
@@ -166,7 +155,7 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
 
     graphDisplay.innerHTML = "";
     const g = eng.graphs.find((x) => x.name === active);
-    if (g && g.src) {
+    if (eng.status === "ready" && g && g.src) {
       const img = document.createElement("img");
       img.src = g.src;
       img.alt = g.name;
@@ -193,7 +182,7 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
 
   render();
   if (graphScript && evalLivePy) {
-    engine = createEngine(graphScript, evalLivePy, setState, extraModules);
+    engine = createEngine(graphScript, evalLivePy, (mutate) => setState(mutate, false), extraModules);
     engine.tick(state);     // kick off Pyodide load + initial graphs/tables
   }
 

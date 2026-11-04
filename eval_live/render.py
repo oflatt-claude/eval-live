@@ -1,6 +1,7 @@
 """Generate paper artifacts and a portable, embedded-data HTML report."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import html
 import inspect
 import io
@@ -8,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import tempfile
 from typing import Sequence
 
 from .eval_live import Registry, _Output
@@ -15,6 +17,50 @@ from . import latex
 from .store import atomic_write, scalar
 
 PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyodide.js"
+
+
+def discard_outputs(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", table_json=False):
+    """Remove generated outputs while preserving measurements and unrelated files."""
+    names = {f"{item.id}.{fmt if item.kind == 'graph' else 'tex'}" for item in artifacts}
+    if table_json:
+        names.update(f"{item.id}.json" for item in artifacts if item.kind == "table")
+    names.add("index.html")
+    manifest = output / ".eval-live-outputs"
+    if manifest.exists():
+        names.update(manifest.read_text().splitlines())
+    for name in names:
+        if name and Path(name).name == name and name not in (".", ".."):
+            (output / name).unlink(missing_ok=True)
+    manifest.unlink(missing_ok=True)
+
+
+@contextmanager
+def output_directory(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", table_json=False):
+    output.mkdir(parents=True, exist_ok=True)
+    discard_outputs(output, artifacts, fmt=fmt, table_json=table_json)
+    with tempfile.TemporaryDirectory(prefix=".eval-live-", dir=output) as temporary:
+        staging = Path(temporary)
+        try:
+            yield staging
+            names = sorted(path.name for path in staging.iterdir())
+            atomic_write(output / ".eval-live-outputs", "\n".join(names) + "\n")
+            for name in names:
+                (staging / name).replace(output / name)
+        except BaseException:
+            discard_outputs(output, artifacts, fmt=fmt, table_json=table_json)
+            raise
+
+
+def browser_numbers(value):
+    """Reject integers the browser would silently round; keep the JSON data intact."""
+    if (type(value) is int or type(value) is float and value.is_integer()) and abs(value) > 2**53 - 1:
+        raise ValueError(f"integer {value} exceeds the browser's exact range; use a string for identifiers")
+    if isinstance(value, dict):
+        for item in value.values():
+            browser_numbers(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            browser_numbers(item)
 
 
 def source_for(artifacts: Sequence[_Output], source: str | Path | None) -> str:
@@ -38,6 +84,8 @@ def write_html(path: str | Path, data: dict, artifacts: Sequence[_Output], selec
     guard prevents collection in the browser. Keep local execution imports in
     that guarded entry point. Graphs/tables use the pinned Pyodide CDN; raw
     tables need no network. Top-level render/filter functions are required.
+    Whole numbers outside JavaScript's exact range (plus or minus ``2**53 - 1``)
+    raise ``ValueError``. Encode large identifiers as strings.
     """
     from . import css, js, pyodide_lib
 
@@ -52,6 +100,8 @@ def write_html(path: str | Path, data: dict, artifacts: Sequence[_Output], selec
                             "render": artifact.render.__name__,
                             "filter": artifact.interactive_filter.__name__ if artifact.interactive_filter else None})
     bootstrap = f'''import eval_live
+import sys
+sys.modules.pop("_eval_live_report", None)
 import _eval_live_report as report
 _reg = eval_live.Registry()
 for _item in {descriptors!r}:
@@ -64,6 +114,7 @@ eval_live.registry = _reg._bind({selections!r})
     library = pyodide_lib()
 
     def literal(value):
+        browser_numbers(value)
         return json.dumps(value, allow_nan=False).replace("<", "\\u003c")
 
     library_js = re.sub(r"</script", r"<\\/script", js(), flags=re.I)
@@ -90,7 +141,14 @@ def render_outputs(data: dict, outputs: Sequence[_Output], output: str | Path, *
                    fmt: str = "pdf", dpi: int = 150, table_json: bool = False) -> list[Path]:
     """Shared file renderer for Registry.run and Registry.render_to_dir."""
     output = Path(output)
+    with output_directory(output, outputs, fmt=fmt, table_json=table_json) as staging:
+        written, _ = _render_outputs(data, outputs, staging, fmt=fmt, dpi=dpi, table_json=table_json)
+    return [output / path.name for path in written]
+
+
+def _render_outputs(data, outputs, output, *, fmt="pdf", dpi=150, table_json=False):
     written = []
+    tables = []
     macro_names = set()
     for artifact in outputs:
         value = artifact.render(data)
@@ -108,6 +166,7 @@ def render_outputs(data: dict, outputs: Sequence[_Output], output: str | Path, *
         elif artifact.kind == "table":
             if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
                 raise ValueError("table callbacks must return a list of row dictionaries")
+            tables.append((artifact.title, lambda _data, rows=value: rows, None, artifact.caption))
             if table_json:
                 if not value:
                     continue
@@ -118,6 +177,8 @@ def render_outputs(data: dict, outputs: Sequence[_Output], output: str | Path, *
             path = output / f"{artifact.id}.tex"
             atomic_write(path, latex.table(value, columns) if columns else "% No matching rows.\n")
         elif artifact.kind == "macros":
+            rows = [{"macro": name, "value": item} for name, item in value.items()]
+            tables.append((artifact.title, lambda _data, rows=rows: rows, None, artifact.caption))
             lines = []
             for name, item in value.items():
                 if not re.fullmatch(r"[A-Za-z]+", name) or name in macro_names:
@@ -129,7 +190,7 @@ def render_outputs(data: dict, outputs: Sequence[_Output], output: str | Path, *
         else:
             raise ValueError(f"unsupported output: {artifact.kind}")
         written.append(path)
-    return written
+    return written, tables
 
 
 def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
@@ -147,17 +208,19 @@ def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
     registry._message_handler = message
     bound = registry._bind(selections)
     try:
-        written = render_outputs(data, bound._outputs, output)
-        if artifacts:
-            bound.render_to_console(data)
-            written.append(write_html(output / "index.html", data, artifacts, selections,
-                                      source=source, title=title))
+        with output_directory(output, artifacts) as staging:
+            written, tables = _render_outputs(data, bound._outputs, staging)
+            if artifacts:
+                from . import console
+                console.render(tables, data)
+                written.append(write_html(staging / "index.html", data, artifacts, selections,
+                                          source=source, title=title))
+            if registry.run_messages()[1]["rows"]:
+                raise RuntimeError("rendering reported errors")
     finally:
         for table in registry.run_messages():
             if table["rows"]:
                 print(f"{table['name']}:", file=sys.stderr)
                 for row in table["rows"]:
                     print(f"  {row['message']}", file=sys.stderr)
-    if registry.run_messages()[1]["rows"]:
-        raise RuntimeError("rendering reported errors")
-    return written
+    return [output / path.name for path in written]

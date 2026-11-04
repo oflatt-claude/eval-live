@@ -30,7 +30,7 @@ _JS_MODULES = (
     "sql-filter.js",     # looksLikeSql / sqlMatchSet (AlaSQL) + clauseForColumn
     "state.js",          # single state object: pure derivations, reducers, clause helpers
     "table-view.js",     # buildTableView: persistent per-table DOM + sync(state)
-    "graph-engine.js",   # createEngine: memoized async Pyodide effects (graphs/tables/narrowing)
+    "graph-engine.js",   # createEngine: complete report calculation in Pyodide
     "eval-live.js",      # initEvalLive: owns state, setState -> render(state)
 )
 

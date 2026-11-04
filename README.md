@@ -93,7 +93,20 @@ emit `eval_live.warn(...)` or `eval_live.error(...)`. These messages are compute
 rendering outputs, never stored in the database. The CLI shows each unique
 message as it occurs, then summarizes all warnings followed by all errors.
 The webpage shows derived warning/error tables that update with filtering.
-Reporting errors fail the CLI after other outputs render; warnings do not.
+Reporting errors fail the CLI after other outputs are evaluated; warnings do not.
+Generated files are published only after successful rendering. A failed or
+interrupted invocation removes generated outputs while preserving saved data.
+
+Only measurement data is cached. Figures, tables, macros, and the webpage are
+regenerated on each run. Browser filter changes recompute the report and publish
+its tables and graphs together. Each output directory holds one report; use
+separate directories to retain different subsets or comparisons.
+
+Reliable statistics still depend on the evaluation script: declare all
+measurement inputs, count timeouts and failures, join comparisons by treatment
+keys, and keep rendering callbacks deterministic. The [Python guide's advice on
+misleading results](docs/python-guide.rst#avoid-misleading-results) explains these
+risks, measurement units, and the browser's integer limits.
 
 The [Python documentation](docs/index.rst) includes a tutorial, data and filter
 contracts, and API reference generated from docstrings. Build it locally with:
@@ -239,19 +252,12 @@ event -> setState(reducer) -> render(state)  [+ engine.tick(state)]
 - **table-view.js** — `buildTableView` builds a table's DOM once, then
   `sync(state)` reconciles it (collapsed class, input values, checkbox state, row
   visibility). It stores no UI state, so collapse/filters survive re-renders.
-- **graph-engine.js** — `createEngine`: the expensive Pyodide work as *memoized
-  async effects* forming an acyclic DAG, writing results back through `setState`:
-
-  ```
-  rawFilteredData ─▶ computedUnfiltered ─▶ narrowing ─▶ effectiveRawData ─▶ { computed tables (displayed), graphs, raw display }
-                       (checkbox options +        (acyclic: narrowing's
-                        narrowing selection)       inputs never depend on it)
-  ```
-
-  A filter on any table — raw or computed — narrows everything: raw rows, graphs,
-  and all computed tables. The narrowing *selection* and the checkbox *options*
-  are taken from the unfiltered tables (`computedUnfiltered`), so options don't
-  vanish as the displayed rows shrink, and there is no recompute cycle.
+- **graph-engine.js** — `createEngine` recomputes a complete report from a
+  snapshot of the filters. Raw filters feed computed tables; their selected
+  output rows determine input narrowing; the narrowed inputs feed displayed
+  tables and graphs. Checkbox options come from the tables before narrowing.
+  Results are published together only if the snapshot still matches the current
+  filters. Pyodide calls are serialized, and typing is debounced.
 - **eval-live.js** — `initEvalLive`: owns the state, wires reducers, and
   `render(state)` reconciles the whole page (graph bar, raw + computed tables).
 
