@@ -100,7 +100,9 @@ interrupted invocation removes generated outputs while preserving saved data.
 Only measurement data is cached. Figures, tables, macros, and the webpage are
 regenerated on each run. Browser filter changes recompute the report and publish
 its tables and graphs together. Each output directory holds one report; use
-separate directories to retain different subsets or comparisons.
+separate directories to retain different subsets or comparisons. The HTML embeds
+all runs referenced by those outputs, including cached runs and other commits,
+with their configurations and diagnostics. Unrelated history stays in `results.json`.
 
 Reliable statistics still depend on the evaluation script: declare all
 measurement inputs, count timeouts and failures, join comparisons by treatment
@@ -148,7 +150,7 @@ eval_live.pyodide_lib()  # eval_live.py source for Pyodide runtime
 The JS library exposes a single entry point:
 
 ```js
-initEvalLive(container, data, name, graphScript, evalLivePy)
+initEvalLive(container, data, name, graphScript, evalLivePy, extraModules)
 ```
 
 - **container**: DOM element or element ID
@@ -156,6 +158,7 @@ initEvalLive(container, data, name, graphScript, evalLivePy)
 - **name**: project name shown in the heading
 - **graphScript** (optional): Python script that builds an `eval_live.Registry`
 - **evalLivePy** (optional): source of the `eval_live.py` library (from `eval_live.pyodide_lib()`)
+- **extraModules** (optional): `{filename: source}` mapping for additional Python modules
 
 ## Graphs and computed tables
 

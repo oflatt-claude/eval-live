@@ -4,17 +4,6 @@
    Table controls live in state.ui and survive replacement of computed rows.
    Loaded after state.js, table-view.js, and graph-engine.js as a plain script. */
 
-// Clarifying subtitles for known raw result tables.
-const TABLE_DESCRIPTIONS = {
-  warnings: "Expected, non-bug failures: timeouts and cells that use a feature "
-    + "the backend/encoding does not support (push/pop, proofs-incompatible "
-    + "commands). Kept out of “errors” on purpose.",
-  errors: "Real, unexpected failures (likely bugs). Expected non-bug failures "
-    + "live in the “warnings” table instead.",
-  skipped: "Files excluded up front (not benchmarked) and why — e.g. "
-    + "unsupported by the term encoding, or no bridge-normal reference.",
-};
-
 /**
  * Render evaluation tables (and, when a graph script is supplied, Pyodide graphs
  * + computed tables) into a container.
@@ -50,8 +39,8 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
   function setState(mutator, recompute = true) {
     const changed = mutator(state);
     if (changed === false) return;          // reducer reported a no-op
-    render();
     if (engine && recompute) engine.tick(state);
+    else render();
   }
 
   const handlers = {
@@ -107,7 +96,7 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
   for (const [tableName, rows] of Object.entries(data)) {
     if (!Array.isArray(rows) || rows.length === 0) continue;
     const view = buildTableView(tableName, rows, "raw", true,
-                                TABLE_DESCRIPTIONS[tableName], handlers);
+                                null, handlers);
     rawViews.push(view);
   }
   if (rawViews.length > 0) {

@@ -1,9 +1,11 @@
-"""eval_live – lightweight library for registering visualizations.
+"""Register a paper's treatments, collectors, figures, tables, and macros.
 
-Create a Registry, add graphs and tables to it, and assign it to the
-module-level ``registry`` variable so eval-live can find it.
+Use ``Registry.run`` to collect required measurements and generate paper
+outputs and an interactive report. ``requires`` selects treatments before
+collection; ``interactive_filter`` narrows saved data in the browser.
 
-Quick start::
+For a standalone viewer with caller-supplied data, assign the rendering
+registry to the module-level ``registry`` variable::
 
     import eval_live
 

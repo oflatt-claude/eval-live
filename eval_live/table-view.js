@@ -18,7 +18,8 @@
  * Build a table view whose sync(state) reads controls from the given kind/name.
  * Rebuild the view when rows or optionRows change; keep those inputs unchanged
  * while it is in use. Computed values are hidden while the engine is loading or
- * failed, and filter controls remain available to edit the selection.
+ * failed. Raw values are also hidden when a computed filter may narrow them.
+ * Filter controls remain available to edit the selection.
  *
  * @param {string} name         displayed table name
  * @param {Array}  rows         the table's rows (fixed for the life of the view)
@@ -98,7 +99,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     sqlInput.type = "text";
     sqlInput.className = "sql-filter-input";
     sqlInput.placeholder =
-      "SQL filter, e.g.  backend IN ('feldera','flowlog') AND mode = 'proofs'   (plain text = substring match)";
+      "SQL filter, e.g.  size >= 100 AND status = 'success'   (plain text = substring match)";
     sqlInput.addEventListener("input", () => handlers.onSql(name, sqlInput.value, kind));
     sqlWrap.appendChild(sqlInput);
     const hint = document.createElement("span");
@@ -140,7 +141,8 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
         cb.type = "checkbox";
         cb.checked = true;
         const span = document.createElement("span");
-        span.textContent = value === "" ? "(empty)" : value;
+        span.textContent = value === null ? "(null / missing)" : value === "" ? "(empty string)"
+          : typeof value === "string" ? JSON.stringify(value) : String(value);
         label.appendChild(cb);
         label.appendChild(span);
         list.appendChild(label);
@@ -259,8 +261,8 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
         if (wanted === null) {
           for (const b of group.boxes) b.cb.checked = true;
         } else {
-          const set = new Set(wanted.map((v) => v.toLowerCase()));
-          for (const b of group.boxes) b.cb.checked = set.has(String(b.value).toLowerCase());
+          const set = new Set(wanted);
+          for (const b of group.boxes) b.cb.checked = set.has(b.value);
         }
       }
     }
@@ -273,7 +275,9 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
       allowed = narrowedKeySet(state.engine.narrowing[name]);
     }
     const shown = new Array(rows.length).fill(false);
-    const pending = kind !== "raw" && state.graphScript && state.engine.status !== "ready";
+    const hasComputedFilter = Object.values(state.ui.tables).some((controls) =>
+      controls.kind === "computed" && (controls.sql.trim() || Object.keys(controls.colFilters).length));
+    const pending = (kind !== "raw" || hasComputedFilter) && state.graphScript && state.engine.status !== "ready";
     for (const i of idxs) {
       if (pending) continue;
       if (allowed && !allowed.has(rowKey(rows[i]))) continue;

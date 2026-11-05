@@ -211,16 +211,17 @@ class Store:
             groups = {}
             for row in self.data[table]:
                 groups.setdefault((row[key], row.get("scope", "")), []).append(row)
-            for rows in groups.values():
-                read_parameters(rows)
+            decoded = {group: read_parameters(rows) for group, rows in groups.items()}
             if table == "eval_configs":
-                for config_id in configs:
-                    scopes = {scope: read_parameters(rows) for (identity, scope), rows in groups.items() if identity == config_id}
+                by_config = {}
+                for (config_id, scope), values in decoded.items():
+                    by_config.setdefault(config_id, {})[scope] = values
+                for config_id, scopes in by_config.items():
                     if set(scopes) != {"request", "arguments", "build"} or digest(scopes) != config_id:
                         raise ValueError("configuration identity does not match its parameters")
             elif table == "eval_environments":
-                for (environment_id, _scope), rows in groups.items():
-                    if digest(read_parameters(rows)) != environment_id:
+                for (environment_id, _scope), values in decoded.items():
+                    if digest(values) != environment_id:
                         raise ValueError("environment identity does not match its parameters")
             elif {identity for identity, _scope in groups} != invocations:
                 raise ValueError("invocation has no saved arguments")
@@ -277,6 +278,7 @@ class Store:
             not isinstance(value, str) or not value for key in requirements for value in key
         ):
             raise ValueError("invalid or duplicate output requirement")
+        requirements = set(requirements)
         for row in self.data["eval_selections"]:
             if tuple(row[key] for key in requirement_keys) not in requirements:
                 raise ValueError("selection has no output requirement")

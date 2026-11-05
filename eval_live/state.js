@@ -194,14 +194,15 @@ function computedFilterInputs(state) {
 // Sorted distinct values of a column, or null if any value is a non-scalar
 // (object/array) -- such columns get no checkbox dropdown. Pure so the dropdown
 // list can be derived (and tested) rather than computed ad hoc in the view.
+// Preserve scalar types; missing cells and null share one option.
 function distinctScalarValues(rows, col) {
   const distinct = new Set();
   for (const r of rows) {
     const v = r[col];
     if (v !== undefined && v !== null && typeof v === "object") return null;
-    distinct.add(v === undefined || v === null ? "" : String(v));
+    distinct.add(v === undefined ? null : v);
   }
-  return [...distinct].sort();
+  return [...distinct].sort((a, b) => String(a).localeCompare(String(b)) || (typeof a).localeCompare(typeof b));
 }
 
 // Identify JSON rows by their complete contents, independent of object key order.
@@ -249,48 +250,59 @@ function bestNumericCols(row, cols, mode) {
 // rewrites ui.sql when a checkbox toggles. State for "which clause did this
 // column generate" is derived from the SQL text itself -- nothing extra stored.
 
-// Recognize `col = 'v'` or `col IN ('a','b',...)`; returns the value list, or
-// null if there is no such clause for `col`.
-function extractColumnValues(text, col) {
+// Recognize only simple scalar predicates, optionally grouped with IS NULL.
+// Split at top-level ANDs without altering quoted strings or nested expressions.
+function sqlConjuncts(text) {
+  const parts = [];
+  let start = 0, depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "'" || text[i] === '"' || text[i] === "[") {
+      const end = text[i] === "[" ? "]" : text[i];
+      while (++i < text.length) {
+        if (text[i] !== end) continue;
+        if (text[i + 1] === end) { i++; continue; }
+        break;
+      }
+    } else if (text[i] === "(") depth++;
+    else if (text[i] === ")") depth--;
+    else if (depth === 0 && /^\bAND\b/i.test(text.slice(i)) && !/\w/.test(text[i - 1] || "")) {
+      parts.push(text.slice(start, i).trim());
+      start = i + 3;
+      i += 2;
+    }
+  }
+  parts.push(text.slice(start).trim());
+  return parts;
+}
+
+function columnValues(clause, col) {
   const escaped = col.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const c = `(?:\\[${escaped}\\]|\\b${escaped}\\b)`;
-  const inRe = new RegExp(`${c}\\s+IN\\s*\\(([^)]*)\\)`, "i");
-  const eqRe = new RegExp(`${c}\\s*=\\s*'((?:[^']|'')*)'`, "i");
-  let m = inRe.exec(text);
-  if (m) {
-    const vals = [];
-    const re = /'((?:[^']|'')*)'/g;
-    let mm;
-    while ((mm = re.exec(m[1])) !== null) vals.push(mm[1].replace(/''/g, "'"));
-    return vals;
+  const literal = "(?:'(?:[^']|'')*'|TRUE|FALSE|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[-+]?\\d+)?)";
+  const predicate = `${c}\\s*(?:=\\s*(${literal})|IN\\s*\\(\\s*(${literal}(?:\\s*,\\s*${literal})*)\\s*\\)|IS\\s+(NULL))`;
+  const nullOr = new RegExp(`^\\(\\s*(${predicate})\\s+OR\\s+${c}\\s+IS\\s+NULL\\s*\\)$`, "i");
+  const group = nullOr.exec(clause);
+  const match = new RegExp(`^${predicate}$`, "i").exec(group ? group[1] : clause);
+  if (!match) return null;
+  const values = match[3] ? [null] : (match[1] || match[2]).match(new RegExp(literal, "gi")).map((token) => {
+    if (token[0] === "'") return token.slice(1, -1).replace(/''/g, "'");
+    if (/^(TRUE|FALSE)$/i.test(token)) return token.toUpperCase() === "TRUE";
+    return Number(token);
+  });
+  if (group) values.push(null);
+  return values;
+}
+
+function extractColumnValues(text, col) {
+  for (const clause of sqlConjuncts(text)) {
+    const values = columnValues(clause, col);
+    if (values !== null) return values;
   }
-  m = eqRe.exec(text);
-  if (m) return [m[1].replace(/''/g, "'")];
   return null;
 }
 
-// Tidy doubled / dangling AND glue left by removing a clause.
-function tidyAnds(text) {
-  return text
-    .replace(/^\s*AND\s+/i, "")
-    .replace(/\s+AND\s*$/i, "")
-    .replace(/\s+AND(\s+AND)+\s+/gi, " AND ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// Remove any recognizable `col = ...` / `col IN (...)` clause for `col` from
-// `sql`, healing one adjacent AND so no dangling glue remains.
 function removeColumnClause(sql, col) {
-  const escaped = col.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const c = `(?:\\[${escaped}\\]|\\b${escaped}\\b)`;
-  const inRe = new RegExp(`(\\s*AND\\s+)?${c}\\s+IN\\s*\\([^)]*\\)(\\s+AND\\s*)?`, "i");
-  const eqRe = new RegExp(`(\\s*AND\\s+)?${c}\\s*=\\s*'(?:[^']|'')*'(\\s+AND\\s*)?`, "i");
-  let text = sql;
-  for (const re of [inRe, eqRe]) {
-    text = text.replace(re, (full, before, after) => (before && after ? " AND " : ""));
-  }
-  return tidyAnds(text);
+  return sqlConjuncts(sql).filter((clause) => clause && columnValues(clause, col) === null).join(" AND ");
 }
 
 // Replace the clause for `col` in `sql` with `newClause` ("" removes it),
@@ -379,7 +391,7 @@ if (typeof module !== "undefined" && module.exports) {
     visibleRowIndices, visibleRows, rawFilteredData, effectiveRawData,
     computedFilterInputs, distinctScalarValues, rowKey, narrowedKeySet,
     isNumericValue, bestNumericCols,
-    extractColumnValues, removeColumnClause, setColumnClause, columnClauseFor, tidyAnds,
+    extractColumnValues, removeColumnClause, setColumnClause, columnClauseFor,
     toggleCollapsed, setSql, setColFilter, setActiveGraph, toggleCheckbox,
     resolveActiveGraph, setHighlight, clearAllFilters,
   };

@@ -93,10 +93,10 @@ test("clearAllFilters resets sql + colFilters across all tables", () => {
   assert.equal(ctx.clearAllFilters(state), false);          // already clear
 });
 
-test("columnClauseFor: all checked -> '', subset -> = / IN", () => {
+test("columnClauseFor: all checked -> '', subset -> IN", () => {
   const all = ["feldera", "flowlog"];
   assert.equal(ctx.columnClauseFor("backend", all, all), "");
-  assert.equal(ctx.columnClauseFor("backend", ["feldera"], all), "[backend] = 'feldera'");
+  assert.equal(ctx.columnClauseFor("backend", ["feldera"], all), "[backend] IN ('feldera')");
   assert.equal(ctx.columnClauseFor("backend", ["feldera", "flowlog"], ["a", "b", "c"]),
     "[backend] IN ('feldera', 'flowlog')");
 });
@@ -162,7 +162,7 @@ test("computedFilterInputs: from UNFILTERED tables, only when filter is active",
 
 test("distinctScalarValues: sorted distinct, null for non-scalar columns", () => {
   eq(ctx.distinctScalarValues(ROWS, "backend"), ["feldera", "flowlog"]);
-  eq(ctx.distinctScalarValues([{ x: 1 }, { x: undefined }, {}], "x"), ["", "1"]);
+  eq(ctx.distinctScalarValues([{ x: 1 }, { x: undefined }, {}], "x"), [1, null]);
   assert.equal(ctx.distinctScalarValues([{ x: { a: 1 } }], "x"), null);
 });
 
@@ -190,9 +190,9 @@ test("setHighlight reducer (default lowest, idempotent)", () => {
 
 test("toggleCheckbox edits the table's SQL box (clause for a column)", () => {
   const state = ctx.makeState({ runs: ROWS });
-  // uncheck flowlog -> only feldera selected -> "backend = 'feldera'"
+  // Unchecking one option generates a typed IN predicate.
   ctx.toggleCheckbox(state, "runs", "backend", ["feldera"], ["feldera", "flowlog"]);
-  assert.equal(state.ui.tables[ctx.tableKey("runs")].sql, "[backend] = 'feldera'");
+  assert.equal(state.ui.tables[ctx.tableKey("runs")].sql, "[backend] IN ('feldera')");
   // re-check both -> clause removed
   ctx.toggleCheckbox(state, "runs", "backend", ["feldera", "flowlog"], ["feldera", "flowlog"]);
   assert.equal(state.ui.tables[ctx.tableKey("runs")].sql, "");
@@ -239,6 +239,28 @@ test("quoted checkbox columns work with reserved names and spaces", () => {
     assert.equal(ctx.removeColumnClause(sql, col), "");
     eq([...ctx.sqlMatchSet(sql, [{[col]: "a"}, {[col]: "b"}])], [0]);
   }
+});
+
+test("checkbox predicates preserve numbers, booleans, strings, null and missing cells", () => {
+  const rows = [500, 2000, 9000, true, false, null, undefined, "", "500", "true", "A", "a", "x) AND '  z"]
+    .map((value) => ({value}));
+  for (const [values, expected] of [
+    [[500, 2000], [0, 1]], [[true], [3]], [[false], [4]], [[null], [5, 6]],
+    [[""], [7]], [["500"], [8]], [["true"], [9]], [["A"], [10]],
+    [[500, null], [0, 5, 6]], [[false, "500", null], [4, 5, 6, 8]],
+    [["x) AND '  z", null], [5, 6, 12]],
+  ]) {
+    const sql = ctx.clauseForColumn("value", values);
+    eq([...ctx.sqlMatchSet(sql, rows)], expected);
+    eq(ctx.extractColumnValues(sql, "value"), values);
+    assert.equal(ctx.removeColumnClause(sql, "value"), "");
+    const combined = "note = 'x AND  y' AND " + sql + " AND size BETWEEN 1 AND 2";
+    eq(ctx.extractColumnValues(combined, "value"), values);
+    assert.equal(ctx.setColumnClause(combined, "value", ""), "note = 'x AND  y' AND size BETWEEN 1 AND 2");
+  }
+  eq(ctx.distinctScalarValues([{v: 1}, {v: "1"}, {v: null}, {}], "v"), [1, "1", null]);
+  eq(ctx.extractColumnValues("[value] = -1.5e2", "value"), [-150]);
+  eq(ctx.extractColumnValues("[value] = FALSE", "value"), [false]);
 });
 
 test("unsafe browser integers fail rather than round silently", () => {

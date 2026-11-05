@@ -7,6 +7,7 @@
    The shim implements only what these modules touch. Run: `node test/dom.test.mjs`. */
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 
 // ---- minimal DOM shim -----------------------------------------------------
@@ -225,6 +226,43 @@ test("styled cells render their text + apply inline style, and caption shows", (
   assert.equal(bad.textContent, "slower");
   assert.equal(bad.style.color, "red");
   assert.equal(bad.style.fontWeight, "600");
+});
+
+test("checkbox DOM state distinguishes scalar types and string case", () => {
+  ctx.alasql = createRequire(import.meta.url)("../eval_live/vendor/alasql.min.js");
+  const root = new El("div");
+  const api = ctx.initEvalLive(root, {values: [true, "true", "A", "a", null, ""].map(value => ({value}))});
+  const section = root.find("table-section");
+  const sql = section.find("sql-filter-input");
+  for (const [text, label] of [["[value] IN (TRUE)", "true"], ["[value] IN ('true')", '\"true\"'],
+      ["[value] IN ('A')", '\"A\"'], ["[value] IS NULL", "(null / missing)"],
+      ["[value] IN ('')", "(empty string)"]]) {
+    sql.value = text;
+    sql.dispatch("input");
+    api.render();
+    assert.equal(visibleRowCount(section), 1);
+    const checked = section.findAll("checkbox-item").filter(el => el._children[0].checked);
+    assert.deepEqual(checked.map(el => el.textContent), [label]);
+  }
+});
+
+test("raw values wait for computed narrowing and stay hidden on failure", () => {
+  const rows = [{value: 1}, {value: 2}];
+  const state = ctx.makeState({samples: rows}, "Report", "python");
+  const view = ctx.buildTableView("samples", rows, "raw", true, null, {});
+  ctx.setSql(state, "Summary", "value > 0", "computed");
+  view.sync(state);
+  assert.equal(visibleRowCount(view.section), 0);
+  assert.equal(view.section.find("row-count").textContent, "(updating)");
+  state.engine.status = "ready";
+  state.engine.narrowing = {samples: [rows[1]]};
+  view.sync(state);
+  assert.equal(visibleRowCount(view.section), 1);
+  state.engine.status = "error";
+  state.engine.narrowing = null;
+  view.sync(state);
+  assert.equal(visibleRowCount(view.section), 0);
+  assert.equal(view.section.find("row-count").textContent, "(unavailable)");
 });
 
 console.log(`\n${passed} tests passed`);

@@ -92,6 +92,63 @@ def source_for(artifacts: Sequence[_Output], source: str | Path | None) -> str:
     return Path(paths.pop()).read_text(encoding="utf-8")
 
 
+def browser_callbacks(artifacts: Sequence[_Output], source: str | Path | None) -> tuple[str, list[dict]]:
+    """Validate selected browser callbacks and return their source and descriptors.
+
+    Render and interactive filter callbacks must be named top-level functions.
+    Without explicit source, all callbacks must come from one readable file.
+    This checks export structure, not execution or browser package availability.
+    """
+    descriptors = []
+    for artifact in artifacts:
+        for function in (artifact.render, artifact.interactive_filter):
+            if function and (function.__name__ != function.__qualname__ or function.__name__ == "<lambda>"):
+                raise ValueError("HTML callbacks must be named top-level functions")
+        descriptors.append({"id": artifact.id, "kind": artifact.kind,
+                            "title": artifact.title, "caption": artifact.caption,
+                            "render": artifact.render.__name__,
+                            "filter": artifact.interactive_filter.__name__ if artifact.interactive_filter else None})
+    return source_for(artifacts, source), descriptors
+
+
+def report_data(data: dict, selections: dict, invocation_id: str) -> dict:
+    """Select all referenced runs and their provenance for a generated report.
+
+    Include cached runs from earlier invocations and other commits. Keep the
+    current output requirements, including empty selections, and invocation
+    ancestry; omit unrelated runs and historical output selections. The complete
+    database is unchanged, and empty tables retain their names.
+    """
+    ids = {run_id for scopes in selections.values() for runs in scopes.values() for run_id in runs}
+    runs = [row for row in data["eval_runs"] if row["run_id"] in ids]
+    configs = {row["config_id"] for row in runs}
+    environments = {row["environment_id"] for row in runs}
+    invocations = {row["invocation_id"]: row for row in data["eval_invocations"]}
+    included = set()
+    pending = {invocation_id, *(row["invocation_id"] for row in runs)}
+    while pending:
+        identity = pending.pop()
+        included.add(identity)
+        source = invocations[identity].get("source_invocation")
+        if source is not None and source not in included:
+            pending.add(source)
+
+    def keep(name, row):
+        if name in ("eval_requirements", "eval_selections"):
+            return row["invocation_id"] == invocation_id and row["artifact_id"] in selections
+        if "run_id" in row:
+            return row["run_id"] in ids
+        if "config_id" in row:
+            return row["config_id"] in configs
+        if "environment_id" in row:
+            return row["environment_id"] in environments
+        if "invocation_id" in row:
+            return row["invocation_id"] in included
+        return name == "eval_metadata"
+
+    return {name: [dict(row) for row in rows if keep(name, row)] for name, rows in data.items()}
+
+
 def write_html(path: str | Path, data: dict, artifacts: Sequence[_Output], selections: dict,
                *, source: str | Path | None = None, title: str = "Paper evaluation") -> Path:
     """Write an HTML report containing data, saved selections, and Python callbacks.
@@ -105,16 +162,7 @@ def write_html(path: str | Path, data: dict, artifacts: Sequence[_Output], selec
     """
     from . import css, js, pyodide_lib
 
-    script = source_for(artifacts, source)
-    descriptors = []
-    for artifact in artifacts:
-        for function in (artifact.render, artifact.interactive_filter):
-            if function and (function.__name__ != function.__qualname__ or function.__name__ == "<lambda>"):
-                raise ValueError("HTML callbacks must be named top-level functions")
-        descriptors.append({"id": artifact.id, "kind": artifact.kind,
-                            "title": artifact.title, "caption": artifact.caption,
-                            "render": artifact.render.__name__,
-                            "filter": artifact.interactive_filter.__name__ if artifact.interactive_filter else None})
+    script, descriptors = browser_callbacks(artifacts, source)
     bootstrap = f'''import eval_live
 import sys
 sys.modules.pop("_eval_live_report", None)

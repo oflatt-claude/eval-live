@@ -72,8 +72,12 @@ working files; dirty collection requires ``--allow-dirty`` and bypasses reuse.
 Declare helper functions with ``dependencies``, external files/directories
 with ``inputs``, toolchain versions with ``tools``, and execution variables
 with ``environment``. Relative input paths are read at the target commit;
-absolute inputs are hashed from the filesystem. The library cannot infer
-undeclared globals, dependencies, or external services.
+absolute inputs are hashed from the filesystem. For a committed directory,
+only tracked files are inputs: generated files such as ``__pycache__`` do not
+invalidate it. Tracked-file changes found after a build or collector produce
+failure rows. Absolute directories and ``WORKTREE`` use filesystem contents,
+including untracked files. The library cannot infer undeclared globals,
+dependencies, or external services.
 
 An optional ``build(context) -> Path`` receives ``build_config`` and prepares
 ``context.binary``. Builds share work across compatible treatments in an
@@ -304,7 +308,10 @@ reporting errors, or a failing CLI exit status.
 Ctrl+C stops the whole evaluation: active workers and their commands are
 cancelled on POSIX, queued treatments do not start, and figure generation is
 skipped. Temporary worktrees and their Git registrations are removed after
-workers stop. Completed rows remain saved; unfinished treatments keep explicit
+workers stop. Workers that do not stop within a short grace period are killed;
+pressing Ctrl+C again during cleanup does not interrupt that cleanup. Forced
+termination may leave no command logs for that worker. Completed rows remain
+saved; unfinished treatments keep explicit
 interrupted rows and are eligible for collection on the next invocation.
 After an abrupt process crash, the already-saved placeholders still provide
 row coverage. ``--force`` retains earlier attempts as history.
@@ -363,7 +370,9 @@ macros, and HTML, replacing the previous generated report in its output
 directory. Outputs omitted by ``--only`` or callbacks returning ``None`` are
 removed. ``--data PATH`` shares a measurement cache across output directories;
 use separate output directories to keep several reports. Concurrent invocations
-must use separate output directories.
+must use separate output directories. The HTML contains every run referenced by
+its selected outputs, including cached attempts and other commits, together
+with their provenance. Unrelated history remains in the JSON database.
 
 ``run_tables(data)``, ``run_graphs(data)``, the terminal renderer, and
 ``render_to_dir(data, path)`` use data supplied by the caller and never
@@ -408,11 +417,22 @@ Interactive reports
 -------------------
 
 The HTML uses the same rendering callbacks and saved selections. Rendering
-and filter callbacks must be named top-level functions in one source file,
-or supply ``browser_source=Path(__file__)`` explicitly. Keep execution under
-``if __name__ == '__main__'`` and execution-only imports inside collection
-callbacks or the entry point. Registration is safe during browser imports.
+and filter callbacks must be named top-level functions. They must share one
+source file unless ``browser_source`` supplies the browser module explicitly.
+``reg.run`` checks the selected callbacks before collecting measurements or
+replacing a report, including in render-only mode. This checks export structure;
+Python execution and package availability can still fail during rendering.
+Keep execution under ``if __name__ == '__main__'`` and execution-only imports
+inside collection callbacks or the entry point. Registration is safe during browser imports.
 Treatment selectors can be lambdas or closures: replay does not execute them.
+
+Checkbox filters preserve scalar types: a number and its string spelling are
+separate choices, as are differently capitalized strings. Null and missing cells
+share an option; the empty string is separate. Clearing every checkbox removes
+that column's constraint, as does selecting every option. Generated predicates
+appear in the SQL box and can be edited there. While a computed filter is being
+applied, affected raw rows and computed results stay hidden until the report is
+ready; a failed calculation does not display stale values.
 
 ``requires`` selects treatments before collection and limits each rendering
 callback to its selected data. Browser filtering does not change these
