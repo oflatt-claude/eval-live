@@ -1237,21 +1237,21 @@ class RegistryTests(unittest.TestCase):
                     for revision in ("baseline", "candidate")
                     for row in eval_live.select(data, revision)["measurements"]]
 
-        bound = reg._bind({"current": {"data": ["new-10", "new-20"]},
+        reg._selections = {"current": {"data": ["new-10", "new-20"]},
                            "comparison": {"baseline": ["old-10", "old-20"],
-                                          "candidate": ["new-10", "new-20"]}})
-        current_rows = bound.run_tables(data)[0]["rows"]
+                                          "candidate": ["new-10", "new-20"]}}
+        current_rows = reg.run_tables(data)[0]["rows"]
         self.assertEqual([row["run_id"] for row in current_rows], ["new-10", "new-20"])
         # A measured value can select sizes, then propagate them across commits.
         for cutoff, sizes in ((2, [10]), (0, [])):
             with self.subTest(cutoff=cutoff):
-                filtered = bound.apply_table_filters([
+                filtered = reg.apply_table_filters([
                     {"name": "Current", "filtered_rows": [row for row in current_rows
                                                            if row["seconds"] < cutoff]},
                 ], data)
                 self.assertEqual([row["run_id"] for row in filtered["measurements"]],
                                  [f"{revision}-{size}" for revision in ("old", "new") for size in sizes])
-                rendered = bound.run_tables(filtered)
+                rendered = reg.run_tables(filtered)
                 self.assertEqual([row["run_id"] for row in rendered[0]["rows"]],
                                  [f"new-{size}" for size in sizes])
                 self.assertEqual(rendered[1]["rows"],

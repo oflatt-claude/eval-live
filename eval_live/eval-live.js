@@ -19,8 +19,9 @@
  * @param {string} [evalLivePy] - source of eval_live.py
  * @param {Object.<string,string>} [extraModules] - {filename: source} extra
  *   Python modules written to the Pyodide filesystem, importable by graphScript
- * @returns {Object} getState() exposes the current state, setState(mutator,
- *   recompute=true) applies a change, and render() redraws without running Python.
+ * @returns {Object} getState() exposes current state; updateFilters(mutator)
+ *   applies an input change and requests calculation. setState(mutator) and
+ *   render() redraw presentation without running Python.
  */
 function initEvalLive(container, data, name, graphScript, evalLivePy, extraModules = {}) {
   if (typeof container === "string") container = document.getElementById(container);
@@ -30,25 +31,23 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
   const state = makeState(data, name, graphScript, evalLivePy);
   let engine = null;   // created at the end, once the DOM skeleton exists
 
-  // --- reducer dispatch ---------------------------------------------------
-  /**
-   * Apply a synchronous state mutation and redraw. Return false from mutator
-   * for a no-op. Keep recompute=true for filter edits; engine updates and changes
-   * to collapse, highlighting, or the active graph must pass false.
-   */
-  function setState(mutator, recompute = true) {
-    const changed = mutator(state);
-    if (changed === false) return;          // reducer reported a no-op
-    if (engine && recompute) engine.tick(state);
+  // Presentation and engine updates never request another calculation.
+  function setState(mutator) {
+    if (mutator(state) !== false) render();
+  }
+
+  function updateFilters(mutator) {
+    if (mutator(state) === false) return;
+    if (engine) engine.tick(state);
     else render();
   }
 
   const handlers = {
-    onToggleCollapse: (n, kind) => setState((s) => toggleCollapsed(s, n, kind), false),
-    onSql: (n, val, kind) => setState((s) => setSql(s, n, val, kind)),
-    onColFilter: (n, col, val, kind) => setState((s) => setColFilter(s, n, col, val, kind)),
-    onHighlight: (n, mode, kind) => setState((s) => setHighlight(s, n, mode, kind), false),
-    onCheckbox: (n, col, checked, all, kind) => setState((s) => toggleCheckbox(s, n, col, checked, all, kind)),
+    onToggleCollapse: (n, kind) => setState((s) => toggleCollapsed(s, n, kind)),
+    onSql: (n, val, kind) => updateFilters((s) => setSql(s, n, val, kind)),
+    onColFilter: (n, col, val, kind) => updateFilters((s) => setColFilter(s, n, col, val, kind)),
+    onHighlight: (n, mode, kind) => setState((s) => setHighlight(s, n, mode, kind)),
+    onCheckbox: (n, col, checked, all, kind) => updateFilters((s) => toggleCheckbox(s, n, col, checked, all, kind)),
   };
 
   // --- persistent DOM skeleton (built once) -------------------------------
@@ -61,7 +60,6 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
 
   // Graph section (only with a graph script). render() fills bar + display.
   let graphStatusEl = null, graphBar = null, graphDisplay = null;
-  let lastGraphsRef = null;
   if (graphScript && evalLivePy) {
     const graphSection = document.createElement("div");
     graphSection.className = "graph-section";
@@ -80,7 +78,7 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
   const clearBtn = document.createElement("button");
   clearBtn.className = "clear-filters-btn";
   clearBtn.textContent = "Clear all filters";
-  clearBtn.addEventListener("click", () => setState((s) => clearAllFilters(s)));
+  clearBtn.addEventListener("click", () => updateFilters((s) => clearAllFilters(s)));
   container.appendChild(clearBtn);
 
   const computedContainer = document.createElement("div");
@@ -108,27 +106,30 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
     for (const v of rawViews) rawContainer.appendChild(v.section);
   }
 
-  // Replace computed views when the engine publishes a report. Their controls
-  // remain in state.ui, independent of the rows being replaced.
-  let computedViews = [];
-  let lastComputedRef = null;
-  let lastUnfilteredRef = null;
-  let lastMessagesRef = null;
-  function rebuildComputedViews() {
-    computedContainer.innerHTML = "";
-    computedViews = [];
-    for (const t of [...state.engine.computedTables, ...state.engine.messages]) {
-      const kind = state.engine.messages.includes(t) ? "message" : "computed";
-      const unfiltered = state.engine.computedUnfiltered.find((u) => u.name === t.name);
-      const optionRows = kind === "computed" && unfiltered ? unfiltered.rows : t.rows;
-      if (!optionRows || optionRows.length === 0) continue;
-      ensureTableUi(state, t.name, kind);     // persist ui across rebuilds
-      // Checkbox options come from the UNFILTERED version of this table, so
-      // unchecking a value doesn't make it disappear as the display narrows.
-      const view = buildTableView(t.name, t.rows, kind, true,
-                                  t.caption, handlers, optionRows);
-      computedViews.push(view);
-      computedContainer.appendChild(view.section);
+  const computedViews = new Map();
+  function renderComputedTables() {
+    const present = new Set();
+    for (const [kind, tables] of [["computed", state.engine.computedTables], ["message", state.engine.messages]]) {
+      for (const table of tables) {
+        const key = tableKey(table.name, kind);
+        const unfiltered = state.engine.computedUnfiltered.find(t => t.name === table.name);
+        const options = kind === "computed" && unfiltered ? unfiltered.rows : table.rows;
+        if (kind === "message" && !table.rows.length) continue;
+        if (!options.length && !computedViews.has(key)) continue;
+        present.add(key);
+        ensureTableUi(state, table.name, kind);
+        let view = computedViews.get(key);
+        if (!view) {
+          view = buildTableView(table.name, table.rows, kind, true, table.caption, handlers, options);
+          computedViews.set(key, view);
+          computedContainer.appendChild(view.section);
+        }
+        view.update(table.rows, options);
+        view.sync(state);
+      }
+    }
+    for (const [key, view] of computedViews) {
+      if (!present.has(key)) { view.section.remove(); computedViews.delete(key); }
     }
   }
 
@@ -140,16 +141,13 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
       eng.status === "ready" ? (eng.graphs.length ? "" : "No graphs registered.")
                              : eng.statusText || "";
 
-    if (eng.graphs !== lastGraphsRef) {
-      lastGraphsRef = eng.graphs;
-      graphBar.innerHTML = "";
-      for (const g of eng.graphs) {
-        const btn = document.createElement("button");
-        btn.className = "graph-btn";
-        btn.textContent = g.name;
-        btn.addEventListener("click", () => setState((s) => setActiveGraph(s, g.name), false));
-        graphBar.appendChild(btn);
-      }
+    graphBar.innerHTML = "";
+    for (const g of eng.graphs) {
+      const btn = document.createElement("button");
+      btn.className = "graph-btn";
+      btn.textContent = g.name;
+      btn.addEventListener("click", () => setState((s) => setActiveGraph(s, g.name)));
+      graphBar.appendChild(btn);
     }
 
     const active = resolveActiveGraph(state);
@@ -169,25 +167,15 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
   // --- the render: reconcile everything from state ------------------------
   function render() {
     syncGraphs();
-    // Rebuild computed views when the displayed rows OR the unfiltered rows
-    // (which feed the dropdown options) change.
-    if (state.engine.computedTables !== lastComputedRef ||
-        state.engine.computedUnfiltered !== lastUnfilteredRef ||
-        state.engine.messages !== lastMessagesRef) {
-      lastComputedRef = state.engine.computedTables;
-      lastUnfilteredRef = state.engine.computedUnfiltered;
-      lastMessagesRef = state.engine.messages;
-      rebuildComputedViews();
-    }
-    for (const v of computedViews) v.sync(state);
+    renderComputedTables();
     for (const v of rawViews) v.sync(state);
   }
 
   render();
   if (graphScript && evalLivePy) {
-    engine = createEngine(graphScript, evalLivePy, (mutate) => setState(mutate, false), extraModules);
+    engine = createEngine(graphScript, evalLivePy, setState, extraModules);
     engine.tick(state);     // kick off Pyodide load + initial graphs/tables
   }
 
-  return { getState: () => state, setState, render };
+  return { getState: () => state, updateFilters, setState, render };
 }

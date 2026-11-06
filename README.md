@@ -247,17 +247,22 @@ current report in `state.engine`. Saved rows stay unchanged for the lifetime of
 the page. Raw tables, computed tables, and diagnostics have independent controls,
 even when their display names match.
 
-Filter edits update the controls and call `engine.tick(state)`. Collapsing a
-table, changing highlighting, and switching graph tabs only redraw the view.
-The engine also redraws when it publishes status or results: those updates use
-`setState(mutator, false)` so they cannot start another calculation.
+Filter edits use `updateFilters(mutator)` to update the controls and request a
+calculation. `setState(mutator)` redraws the page for presentation changes and
+engine results. Collapsing a table, changing highlighting, and switching graph
+tabs do not recalculate the outputs.
+
+SQL, column text, and typed checkbox selections are independent constraints:
+rows must pass all three. Editing SQL leaves checkbox selections intact, and
+checkboxes do not rewrite SQL. Clear all filters resets all three.
 
 - **state.js** — the single state object plus *pure* derivations (row filtering,
-  `rawFilteredData`, clause helpers) and reducers. No DOM, no async; unit-tested
+  `rawFilteredData`) and reducers. No DOM, no async; unit-tested
   directly in node.
-- **table-view.js** — `buildTableView` builds a table's DOM once, then
-  `sync(state)` reconciles it (collapsed class, input values, checkbox state, row
-  visibility). It stores no UI state, so collapse/filters survive re-renders.
+- **table-view.js** — `buildTableView` creates persistent controls. `update`
+  supplies result rows and checkbox options; `sync(state)` updates the controls
+  and replaces the visible rows. Focus, filters, and collapse choices survive
+  result changes; row expansion is local display state.
 - **graph-engine.js** — `createEngine` evaluates Python callbacks from a snapshot
   of the filters and publishes the complete report. It owns no DOM.
 - **eval-live.js** — `initEvalLive`: owns the state, wires reducers, and
@@ -299,7 +304,7 @@ Pure-JS unit + DOM-smoke tests, no npm/jsdom (they run the browser modules in a
 `node:vm` context with a tiny DOM shim):
 
 ```bash
-node test/state.test.mjs   # state core: filtering, reducers, SQL-clause helpers
+node test/state.test.mjs   # state core: filtering, reducers, typed selections
 node test/dom.test.mjs      # initEvalLive end-to-end: filter / collapse / checkbox / clear
 node test/graph-engine.test.mjs  # Pyodide conversion boundary: graphs / tables / narrowing
 python test/test_registry.py

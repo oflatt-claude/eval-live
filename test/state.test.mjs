@@ -1,5 +1,5 @@
 /* Dependency-free unit tests for the eval-live state core (state.js) and the
-   SQL-clause helpers it shares with sql-filter.js. No npm, no jsdom: we run the
+   SQL and checkbox filtering helpers. No npm, no jsdom: we run the
    two browser modules inside a node:vm context (where their top-level function
    declarations become context globals) and assert against them directly.
 
@@ -93,38 +93,29 @@ test("clearAllFilters resets sql + colFilters across all tables", () => {
   assert.equal(ctx.clearAllFilters(state), false);          // already clear
 });
 
-test("columnClauseFor: all checked -> '', subset -> IN", () => {
-  const all = ["feldera", "flowlog"];
-  assert.equal(ctx.columnClauseFor("backend", all, all), "");
-  assert.equal(ctx.columnClauseFor("backend", ["feldera"], all), "[backend] IN ('feldera')");
-  assert.equal(ctx.columnClauseFor("backend", ["feldera", "flowlog"], ["a", "b", "c"]),
-    "[backend] IN ('feldera', 'flowlog')");
+test("checkboxes combine across columns without changing SQL", () => {
+  const state = ctx.makeState({runs: ROWS});
+  ctx.setSql(state, "runs", "proofs");
+  ctx.toggleCheckbox(state, "runs", "backend", ["flowlog"], ["feldera", "flowlog"]);
+  eq(ctx.rawFilteredData(state).runs, [ROWS[2]]);
+  ctx.toggleCheckbox(state, "runs", "mode", ["naive"], ["proofs", "naive"]);
+  eq(ctx.rawFilteredData(state).runs, []);
+  assert.equal(ctx.ensureTableUi(state, "runs").sql, "proofs");
+  ctx.setSql(state, "runs", "");
+  eq(ctx.rawFilteredData(state).runs, [ROWS[3]]);
+  ctx.setColFilter(state, "runs", "file", "c");
+  eq(ctx.rawFilteredData(state).runs, []);
 });
 
-test("setColumnClause adds, replaces, and removes a column's clause", () => {
-  let sql = "";
-  sql = ctx.setColumnClause(sql, "backend", "backend = 'feldera'");
-  assert.equal(sql, "backend = 'feldera'");
-  sql = ctx.setColumnClause(sql, "mode", "mode = 'proofs'");
-  assert.equal(sql, "backend = 'feldera' AND mode = 'proofs'");
-  // replace backend's clause without disturbing mode
-  sql = ctx.setColumnClause(sql, "backend", "backend IN ('feldera', 'flowlog')");
-  assert.equal(sql, "mode = 'proofs' AND backend IN ('feldera', 'flowlog')");
-  // remove mode's clause, no dangling AND
-  sql = ctx.setColumnClause(sql, "mode", "");
-  assert.equal(sql, "backend IN ('feldera', 'flowlog')");
-});
-
-test("extractColumnValues recognizes = and IN, returns null otherwise", () => {
-  eq(ctx.extractColumnValues("backend = 'feldera'", "backend"), ["feldera"]);
-  eq(ctx.extractColumnValues("backend IN ('a', 'b')", "backend"), ["a", "b"]);
-  assert.equal(ctx.extractColumnValues("mode = 'proofs'", "backend"), null);
-});
-
-test("setColumnClause preadds user-typed clauses survive a removal", () => {
-  let sql = "file LIKE '%.egg%' AND backend = 'feldera'";
-  sql = ctx.setColumnClause(sql, "backend", "");
-  assert.equal(sql, "file LIKE '%.egg%'");
+test("checkboxes never rewrite arbitrary SQL text", () => {
+  const state = ctx.makeState({runs: ROWS});
+  const sql = "file LIKE '% AND  x%' OR (mode = 'proofs' AND size BETWEEN 1 AND 2)";
+  ctx.setSql(state, "runs", sql);
+  ctx.toggleCheckbox(state, "runs", "backend", ["feldera"], ["feldera", "flowlog"]);
+  assert.equal(ctx.ensureTableUi(state, "runs").sql, sql);
+  ctx.clearAllFilters(state);
+  assert.equal(ctx.hasFilters(ctx.ensureTableUi(state, "runs")), false);
+  eq(ctx.rawFilteredData(state).runs, ROWS);
 });
 
 test("effectiveRawData narrows graph data by engine.narrowing", () => {
@@ -188,14 +179,15 @@ test("setHighlight reducer (default lowest, idempotent)", () => {
   assert.equal(ctx.setHighlight(state, "runs", "highest"), false);
 });
 
-test("toggleCheckbox edits the table's SQL box (clause for a column)", () => {
-  const state = ctx.makeState({ runs: ROWS });
-  // Unchecking one option generates a typed IN predicate.
-  ctx.toggleCheckbox(state, "runs", "backend", ["feldera"], ["feldera", "flowlog"]);
-  assert.equal(state.ui.tables[ctx.tableKey("runs")].sql, "[backend] IN ('feldera')");
-  // re-check both -> clause removed
-  ctx.toggleCheckbox(state, "runs", "backend", ["feldera", "flowlog"], ["feldera", "flowlog"]);
-  assert.equal(state.ui.tables[ctx.tableKey("runs")].sql, "");
+test("checking all or no values removes only that checkbox constraint", () => {
+  const state = ctx.makeState({runs: ROWS});
+  const all = ["feldera", "flowlog"];
+  for (const reset of [[], all]) {
+    ctx.toggleCheckbox(state, "runs", "backend", ["feldera"], all);
+    eq(ctx.rawFilteredData(state).runs, ROWS.slice(0, 2));
+    ctx.toggleCheckbox(state, "runs", "backend", reset, all);
+    eq(ctx.rawFilteredData(state).runs, ROWS);
+  }
 });
 
 test("resolveActiveGraph: chosen if present, else first, else null", () => {
@@ -231,13 +223,20 @@ test("raw, computed, and diagnostic tables have independent filters", () => {
   assert.equal(ctx.ensureTableUi(state, "Summary", "computed").colFilters.value, "1.5");
 });
 
-test("quoted checkbox columns work with reserved names and spaces", () => {
+test("checkbox columns accept reserved names, spaces, and punctuation", () => {
+  for (const col of ["value", "group", "time (ms)", "a] AND [b", "constructor", "__proto__"]) {
+    const rows = [{[col]: "a"}, {[col]: "b"}];
+    const state = ctx.makeState({samples: rows});
+    ctx.toggleCheckbox(state, "samples", col, ["a"], ["a", "b"]);
+    eq(ctx.rawFilteredData(state).samples, [rows[0]]);
+  }
+});
+
+test("SQL literals retain their types across consecutive queries", () => {
   ctx.alasql = createRequire(import.meta.url)("../eval_live/vendor/alasql.min.js");
-  for (const col of ["value", "group", "time (ms)"]) {
-    const sql = ctx.columnClauseFor(col, ["a"], ["a", "b"]);
-    eq(ctx.extractColumnValues(sql, col), ["a"]);
-    assert.equal(ctx.removeColumnClause(sql, col), "");
-    eq([...ctx.sqlMatchSet(sql, [{[col]: "a"}, {[col]: "b"}])], [0]);
+  const rows = [{value: true}, {value: "true"}, {value: 1}, {value: "1"}];
+  for (const [literal, expected] of [["TRUE", 0], ["'true'", 1], ["1", 2], ["'1'", 3]]) {
+    eq([...ctx.sqlMatchSet(`[value] IN (${literal})`, rows)], [expected]);
   }
 });
 
@@ -250,17 +249,18 @@ test("checkbox predicates preserve numbers, booleans, strings, null and missing 
     [[500, null], [0, 5, 6]], [[false, "500", null], [4, 5, 6, 8]],
     [["x) AND '  z", null], [5, 6, 12]],
   ]) {
-    const sql = ctx.clauseForColumn("value", values);
-    eq([...ctx.sqlMatchSet(sql, rows)], expected);
-    eq(ctx.extractColumnValues(sql, "value"), values);
-    assert.equal(ctx.removeColumnClause(sql, "value"), "");
-    const combined = "note = 'x AND  y' AND " + sql + " AND size BETWEEN 1 AND 2";
-    eq(ctx.extractColumnValues(combined, "value"), values);
-    assert.equal(ctx.setColumnClause(combined, "value", ""), "note = 'x AND  y' AND size BETWEEN 1 AND 2");
+    const ui = ctx.makeTableUi("raw");
+    ui.checkedValues.value = values;
+    eq(ctx.visibleRowIndices(rows, ["value"], ui), expected);
   }
   eq(ctx.distinctScalarValues([{v: 1}, {v: "1"}, {v: null}, {}], "v"), [1, "1", null]);
-  eq(ctx.extractColumnValues("[value] = -1.5e2", "value"), [-150]);
-  eq(ctx.extractColumnValues("[value] = FALSE", "value"), [false]);
+});
+
+test("checkbox-only computed filters propagate to shared inputs", () => {
+  const state = ctx.makeState({runs: ROWS});
+  state.engine.computedUnfiltered = [{name: "Summary", rows: ROWS, hasInteractiveFilter: true}];
+  ctx.toggleCheckbox(state, "Summary", "backend", ["feldera"], ["feldera", "flowlog"], "computed");
+  eq(ctx.computedFilterInputs(state), [{name: "Summary", filtered_rows: ROWS.slice(0, 2)}]);
 });
 
 test("unsafe browser integers fail rather than round silently", () => {

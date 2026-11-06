@@ -4,16 +4,15 @@
    outputs in state.engine. Reducers change the live state and report whether it
    changed; eval-live.js decides whether to redraw or request a calculation.
    No DOM or asynchronous work belongs here. Loaded as a plain script after
-   sql-filter.js (sqlMatchSet and clauseForColumn); tested in test/state.test.mjs. */
+   sql-filter.js (sqlMatchSet); tested in test/state.test.mjs. */
 
 // ---- construction ---------------------------------------------------------
 
 function makeTableUi(kind) {
-  // collapsed: minimized to just its heading. sql: the SQL filter box text
-  // (also the single source of truth the checkboxes are derived from).
-  // colFilters: per-column substring inputs, ANDed on top of sql.
+  // SQL, column substrings, and typed checkbox selections are independent
+  // constraints. A row must pass all three. Missing checkbox keys allow all values.
   // highlight: which numeric cell to mark per row -- "lowest" | "highest" | "none".
-  return { kind: kind, collapsed: false, sql: "", colFilters: {}, highlight: "lowest" };
+  return { kind: kind, collapsed: false, sql: "", colFilters: {}, checkedValues: {}, highlight: "lowest" };
 }
 
 /**
@@ -108,10 +107,9 @@ function applyCellStyle(td, style) {
   if (style.dim) td.style.opacity = "0.65";
 }
 
-// Indices of rows passing a table's filter ui: per-column substring inputs
-// (ANDed) and then the SQL box. The SQL box is evaluated once over all rows via
-// AlaSQL (sqlMatchSet); plain/invalid text falls back to a substring match
-// across all columns -- identical semantics to the old applyFilters().
+// Indices of rows passing all checkbox, column text, and SQL constraints.
+// The SQL box is evaluated once over all rows via AlaSQL (sqlMatchSet);
+// plain/invalid text falls back to a substring match across all columns.
 function visibleRowIndices(rows, cols, ui) {
   const sqlText = (ui.sql || "").trim();
   const sqlSet = sqlText ? sqlMatchSet(sqlText, rows) : null;
@@ -119,9 +117,10 @@ function visibleRowIndices(rows, cols, ui) {
   const out = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    let show = true;
+    let show = Object.entries(ui.checkedValues || {}).every(([col, values]) =>
+      values.includes(row[col] === undefined ? null : row[col]));
     for (const col of cols) {
-      const q = (ui.colFilters[col] || "").toLowerCase();
+      const q = (Object.hasOwn(ui.colFilters, col) ? ui.colFilters[col] : "").toLowerCase();
       if (!q) continue;
       if (!cellText(row[col]).toLowerCase().includes(q)) { show = false; break; }
     }
@@ -184,8 +183,7 @@ function computedFilterInputs(state) {
     if (!t.hasInteractiveFilter) continue;
     const ui = state.ui.tables[tableKey(t.name, "computed")];
     if (!ui) continue;
-    const active = (ui.sql && ui.sql.trim()) || Object.keys(ui.colFilters).length > 0;
-    if (!active) continue;
+    if (!hasFilters(ui)) continue;
     out.push({ name: t.name, filtered_rows: visibleRows(t.rows, ui) });
   }
   return out;
@@ -244,80 +242,9 @@ function bestNumericCols(row, cols, mode) {
   return new Set(nums.filter((x) => x.n === best).map((x) => x.col));
 }
 
-// ---- SQL-clause <-> checkbox helpers (pure string ops) --------------------
-// Checkboxes are a VIEW of ui.sql. extractColumnValues reads which values a
-// column is constrained to (for rendering checked state); setColumnClause
-// rewrites ui.sql when a checkbox toggles. State for "which clause did this
-// column generate" is derived from the SQL text itself -- nothing extra stored.
-
-// Recognize only simple scalar predicates, optionally grouped with IS NULL.
-// Split at top-level ANDs without altering quoted strings or nested expressions.
-function sqlConjuncts(text) {
-  const parts = [];
-  let start = 0, depth = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === "'" || text[i] === '"' || text[i] === "[") {
-      const end = text[i] === "[" ? "]" : text[i];
-      while (++i < text.length) {
-        if (text[i] !== end) continue;
-        if (text[i + 1] === end) { i++; continue; }
-        break;
-      }
-    } else if (text[i] === "(") depth++;
-    else if (text[i] === ")") depth--;
-    else if (depth === 0 && /^\bAND\b/i.test(text.slice(i)) && !/\w/.test(text[i - 1] || "")) {
-      parts.push(text.slice(start, i).trim());
-      start = i + 3;
-      i += 2;
-    }
-  }
-  parts.push(text.slice(start).trim());
-  return parts;
-}
-
-function columnValues(clause, col) {
-  const escaped = col.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const c = `(?:\\[${escaped}\\]|\\b${escaped}\\b)`;
-  const literal = "(?:'(?:[^']|'')*'|TRUE|FALSE|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[-+]?\\d+)?)";
-  const predicate = `${c}\\s*(?:=\\s*(${literal})|IN\\s*\\(\\s*(${literal}(?:\\s*,\\s*${literal})*)\\s*\\)|IS\\s+(NULL))`;
-  const nullOr = new RegExp(`^\\(\\s*(${predicate})\\s+OR\\s+${c}\\s+IS\\s+NULL\\s*\\)$`, "i");
-  const group = nullOr.exec(clause);
-  const match = new RegExp(`^${predicate}$`, "i").exec(group ? group[1] : clause);
-  if (!match) return null;
-  const values = match[3] ? [null] : (match[1] || match[2]).match(new RegExp(literal, "gi")).map((token) => {
-    if (token[0] === "'") return token.slice(1, -1).replace(/''/g, "'");
-    if (/^(TRUE|FALSE)$/i.test(token)) return token.toUpperCase() === "TRUE";
-    return Number(token);
-  });
-  if (group) values.push(null);
-  return values;
-}
-
-function extractColumnValues(text, col) {
-  for (const clause of sqlConjuncts(text)) {
-    const values = columnValues(clause, col);
-    if (values !== null) return values;
-  }
-  return null;
-}
-
-function removeColumnClause(sql, col) {
-  return sqlConjuncts(sql).filter((clause) => clause && columnValues(clause, col) === null).join(" AND ");
-}
-
-// Replace the clause for `col` in `sql` with `newClause` ("" removes it),
-// ANDing a non-empty clause onto whatever else the user typed.
-function setColumnClause(sql, col, newClause) {
-  const removed = removeColumnClause(sql, col);
-  if (!newClause) return removed;
-  return removed ? removed + " AND " + newClause : newClause;
-}
-
-// The SQL clause a set of checked values implies for a column, given the full
-// set of distinct values. All checked (or count match) => "" (no constraint).
-function columnClauseFor(col, checkedValues, allValues) {
-  if (checkedValues.length === allValues.length) return "";
-  return clauseForColumn(col, checkedValues); // "" when none checked, from sql-filter.js
+// True when any input constraint is active, including checkbox-only selections.
+function hasFilters(ui) {
+  return !!(ui.sql.trim() || Object.keys(ui.colFilters).length || Object.keys(ui.checkedValues).length);
 }
 
 // ---- reducers (mutate state in place; return true if something changed) ----
@@ -337,9 +264,9 @@ function setSql(state, name, sql, kind = "raw") {
 
 function setColFilter(state, name, col, value, kind = "raw") {
   const ui = ensureTableUi(state, name, kind);
-  const cur = ui.colFilters[col] || "";
+  const cur = Object.hasOwn(ui.colFilters, col) ? ui.colFilters[col] : "";
   if (cur === (value || "")) return false;
-  if (value) ui.colFilters[col] = value; else delete ui.colFilters[col];
+  if (value) ui.colFilters = {...ui.colFilters, [col]: value}; else delete ui.colFilters[col];
   return true;
 }
 
@@ -349,13 +276,12 @@ function setActiveGraph(state, name) {
   return true;
 }
 
-// Apply a checkbox toggle for `col`: regenerate the column's clause from the
-// `checked` values (out of `all`) and splice it into the table's SQL box. The
-// checkboxes are a view of ui.sql, so this is just an edit to that string.
+// All checked or none checked removes the constraint; SQL text is unchanged.
 function toggleCheckbox(state, name, col, checked, all, kind = "raw") {
   const ui = ensureTableUi(state, name, kind);
-  const clause = columnClauseFor(col, checked, all);
-  return setSql(state, name, setColumnClause(ui.sql || "", col, clause), kind);
+  if (!checked.length || checked.length === all.length) delete ui.checkedValues[col];
+  else ui.checkedValues = {...ui.checkedValues, [col]: [...checked]};
+  return true;
 }
 
 // The graph to show: the chosen one if it still exists, else the first. Pure so
@@ -380,6 +306,7 @@ function clearAllFilters(state) {
     const ui = state.ui.tables[name];
     if (ui.sql) { ui.sql = ""; changed = true; }
     if (Object.keys(ui.colFilters).length) { ui.colFilters = {}; changed = true; }
+    if (Object.keys(ui.checkedValues).length) { ui.checkedValues = {}; changed = true; }
   }
   return changed;
 }
@@ -391,7 +318,7 @@ if (typeof module !== "undefined" && module.exports) {
     visibleRowIndices, visibleRows, rawFilteredData, effectiveRawData,
     computedFilterInputs, distinctScalarValues, rowKey, narrowedKeySet,
     isNumericValue, bestNumericCols,
-    extractColumnValues, removeColumnClause, setColumnClause, columnClauseFor,
+    hasFilters,
     toggleCollapsed, setSql, setColFilter, setActiveGraph, toggleCheckbox,
     resolveActiveGraph, setHighlight, clearAllFilters,
   };

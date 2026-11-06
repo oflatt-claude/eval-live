@@ -12,7 +12,6 @@ from pathlib import Path
 import platform
 import sys
 import time
-from types import MappingProxyType
 from typing import Mapping, Sequence
 import uuid
 
@@ -20,7 +19,7 @@ from .eval_live import Registry, _Output
 from .benchmarks import Benchmark, ProcessError, RunContext, file_digest
 from .cli import CONTROL_ARGUMENTS
 from .render import browser_callbacks, discard_outputs, render_artifacts, report_data
-from .store import Store, digest, parameter_rows, parameters, validate_tables
+from .store import Store, digest, parameter_rows, parameters, readonly_parameters, run_identity
 from .targets import Target, script_revision
 from ._workers import Outcome, Worker, completed, ignore_interrupts, measure
 
@@ -46,6 +45,90 @@ class PlannedRun:
     selected: dict | None = None
     needed_by: list[str] = field(default_factory=list)
     fallback: dict = field(default_factory=dict)
+
+
+def _replace_rows(store: Store, row: dict, tables: dict) -> None:
+    for name in set(tables) | {name for name in store.data if not name.startswith("eval_")}:
+        store.data[name] = [item for item in store.data.get(name, []) if item["run_id"] != row["run_id"]]
+        store.data[name].extend(dict(item, run_id=row["run_id"]) for item in tables.get(name, []))
+
+
+@dataclass
+class _Attempt:
+    """Own one collector's preparation, diagnostics, and temporary checkout.
+
+    The parent prepares and finishes attempts in both execution modes. Its outer
+    ExitStack also owns ``checkout`` so failures before finish still release it.
+    A worker must stop before its attempt is finished or its checkout is closed.
+    """
+
+    planned: PlannedRun
+    row: dict
+    started: float = field(default_factory=time.perf_counter)
+    directory: Path | None = None
+    contexts: list[RunContext] = field(default_factory=list)
+    checkout: ExitStack = field(default_factory=ExitStack)
+
+    def prepare(self, stack: ExitStack, directories: dict, binaries: dict, *, parallel: bool) -> tuple:
+        """Prepare inputs/builds and return the arguments for a collector context."""
+        planned = self.planned
+        benchmark, target = planned.benchmark, planned.target
+        target_key = (target.identity, target.commit, target.working)
+        if not target.inputs_match(benchmark.inputs, planned.inputs):
+            raise ValueError("declared inputs changed after planning")
+        if (not parallel or benchmark.build) and target_key not in directories:
+            directories[target_key] = stack.enter_context(target.checkout())
+        binary = None
+        if benchmark.build:
+            build_key = digest([*target_key, parameters(benchmark.build_config), planned.environment_id,
+                                planned.runner_id, planned.inputs])
+            if build_key not in binaries:
+                build_directory = directories[target_key]
+                context = RunContext(build_directory, parameters(benchmark.build_config),
+                                     target.commit, benchmark.timeout, benchmark.environment)
+                self.contexts.append(context)
+                binary = Path(benchmark.build(context))
+                binary = binary if binary.is_absolute() else build_directory / binary
+                if not binary.is_file():
+                    raise ValueError("build callback did not produce a file")
+                if not target.inputs_match(benchmark.inputs, planned.inputs, build_directory):
+                    raise ValueError("declared inputs changed during the build")
+                binaries[build_key] = binary
+            binary = binaries[build_key]
+            self.row["binary_sha256"] = file_digest(binary)
+        self.directory = self.checkout.enter_context(target.checkout()) if parallel else directories[target_key]
+        if not target.inputs_match(benchmark.inputs, planned.inputs, self.directory):
+            raise ValueError("declared inputs changed while preparing the target")
+        return (self.directory, planned.config, target.commit, benchmark.timeout, dict(benchmark.environment), binary)
+
+    def finish(self, store: Store, outcome: Outcome) -> None:
+        """Checkpoint a completed outcome and release this attempt's checkout."""
+        planned, row = self.planned, self.row
+        try:
+            if outcome.status == "success":
+                try:
+                    # measure() validates scalar cells in either execution mode.
+                    if any(not outcome.tables.get(name) for name in planned.fallback["pending"]):
+                        raise ValueError("collector must return rows in every table declared by error_rows")
+                    if not planned.target.inputs_match(planned.benchmark.inputs, planned.inputs, self.directory):
+                        raise ValueError("declared inputs changed during collection")
+                except Exception as error:
+                    outcome = Outcome(processes=outcome.processes, status="failure", error=str(error))
+            row.update(status=outcome.status, error=outcome.error,
+                       finished_at=now(), seconds=time.perf_counter() - self.started)
+            tables = outcome.tables if outcome.status == "success" else planned.fallback[outcome.status]
+            _replace_rows(store, row, tables)
+            processes = [process for context in self.contexts for process in context.processes] + outcome.processes
+            for process in processes:
+                process_id = str(uuid.uuid4())
+                store.data["eval_processes"].append(dict(process_id=process_id, run_id=row["run_id"],
+                    cwd=process.cwd, seconds=process.seconds, returncode=process.returncode,
+                    stdout=process.stdout, stderr=process.stderr, status=process.status))
+                store.data["eval_commands"].extend(dict(process_id=process_id, run_id=row["run_id"],
+                    position=i, value=value) for i, value in enumerate(process.argv))
+            store.save()
+        finally:
+            self.checkout.close()
 
 
 @dataclass
@@ -158,9 +241,7 @@ class _Runner:
                 treatment = {"benchmark": name, "repository": spec["repository"], **config}
                 if not isinstance(treatment["repository"], str) or not treatment["repository"]:
                     raise ValueError("treatment repository must be a nonempty string")
-                catalog[digest(treatment)] = MappingProxyType({
-                    key: tuple(value) if isinstance(value, list) else value for key, value in treatment.items()
-                })
+                catalog[digest(treatment)] = readonly_parameters(treatment)
         return catalog
 
     @staticmethod
@@ -229,10 +310,9 @@ class _Runner:
                         runner_ids[benchmark_name] = benchmark.identity()
                     runner_id = runner_ids[benchmark_name]
                     environment_id = digest(environment)
-                    key = digest({"repository": target.identity, "commit": target.commit,
-                                  "dirty": target.dirty, "benchmark": benchmark.name,
-                                  "runner": runner_id, "config": config_id, "inputs": inputs,
-                                  "environment": environment_id})
+                    key = digest(run_identity(repository=target.identity, commit=target.commit,
+                                              dirty=target.dirty, benchmark=benchmark.name, runner_id=runner_id,
+                                              config_id=config_id, inputs=inputs, environment_id=environment_id))
                     if key not in plan.runs:
                         plan.runs[key] = PlannedRun(key, benchmark, target, config, measurement_args,
                                                    environment, inputs, config_id, environment_id,
@@ -290,12 +370,6 @@ class _Runner:
                 invocation["finished_at"] = now()
                 store.save()
 
-    @staticmethod
-    def _replace_rows(store: Store, row: dict, tables: dict) -> None:
-        for name in set(tables) | {name for name in store.data if not name.startswith("eval_")}:
-            store.data[name] = [item for item in store.data.get(name, []) if item["run_id"] != row["run_id"]]
-            store.data[name].extend(dict(item, run_id=row["run_id"]) for item in tables.get(name, []))
-
     def _reserve(self, store: Store, plan: Plan, invocation: dict) -> dict:
         """Save every requested treatment's rows before executing any collector."""
         attempts = {}
@@ -322,55 +396,21 @@ class _Runner:
                        status="pending", seconds=None, binary_sha256=None, error=None, has_rows=True)
             store.data["eval_runs"].append(row)
             store.data["eval_inputs"].extend(dict(item, run_id=row["run_id"]) for item in planned.inputs)
-            self._replace_rows(store, row, planned.fallback["pending"])
+            _replace_rows(store, row, planned.fallback["pending"])
             planned.selected = row
             attempts[planned.key] = row
         return attempts
 
     def _collect(self, store: Store, plan: Plan, attempts: dict, *, jobs: int) -> int:
-        collected = 0
         pending = {}
         with ExitStack() as stack:
             directories = {}
             binaries = {}
 
-            def finish(attempt, outcome):
-                nonlocal collected
-                planned, row, started, directory, contexts, checkout = attempt
-                try:
-                    if outcome.status == "success":
-                        try:
-                            validate_tables(outcome.tables, user=True)
-                            if any(not outcome.tables.get(name) for name in planned.fallback["pending"]):
-                                raise ValueError("collector must return rows in every table declared by error_rows")
-                            if not planned.target.inputs_match(planned.benchmark.inputs, planned.inputs, directory):
-                                raise ValueError("declared inputs changed during collection")
-                        except Exception as error:
-                            outcome = Outcome(processes=outcome.processes, status="failure", error=str(error))
-                    row.update(status=outcome.status, error=outcome.error,
-                               finished_at=now(), seconds=time.perf_counter() - started)
-                    if outcome.status == "success":
-                        tables = outcome.tables
-                    else:
-                        tables = planned.fallback[outcome.status]
-                    self._replace_rows(store, row, tables)
-                    collected += 1
-                    processes = [process for context in contexts for process in context.processes] + outcome.processes
-                    for process in processes:
-                        process_id = str(uuid.uuid4())
-                        store.data["eval_processes"].append(dict(process_id=process_id, run_id=row["run_id"],
-                            cwd=process.cwd, seconds=process.seconds, returncode=process.returncode,
-                            stdout=process.stdout, stderr=process.stderr, status=process.status))
-                        store.data["eval_commands"].extend(dict(process_id=process_id, run_id=row["run_id"],
-                            position=i, value=value) for i, value in enumerate(process.argv))
-                    store.save()
-                finally:
-                    checkout.close()
-
             def receive():
                 worker = completed(pending)
                 outcome = worker.result()
-                finish(pending.pop(worker), outcome)
+                pending.pop(worker).finish(store, outcome)
                 if outcome.status == "interrupted":
                     raise KeyboardInterrupt
 
@@ -382,58 +422,26 @@ class _Runner:
                     # Unmarked treatments are barriers: they run with no other collectors active.
                     while pending and (not parallel or len(pending) >= jobs):
                         receive()
-                    benchmark, target = planned.benchmark, planned.target
+                    benchmark = planned.benchmark
                     row = attempts[planned.key]
                     row.update(status="running", started_at=now())
                     store.save()
-                    contexts = []
-                    checkout = stack.enter_context(ExitStack())
-                    started = time.perf_counter()
-                    directory = None
+                    attempt = _Attempt(planned, row)
+                    stack.enter_context(attempt.checkout)
                     try:
-                        target_key = (target.identity, target.commit, target.working)
-                        if not target.inputs_match(benchmark.inputs, planned.inputs):
-                            raise ValueError("declared inputs changed after planning")
-                        if (not parallel or benchmark.build) and target_key not in directories:
-                            directories[target_key] = stack.enter_context(target.checkout())
-                        binary = None
-                        if benchmark.build:
-                            build_key = digest([*target_key,
-                                                parameters(benchmark.build_config), planned.environment_id,
-                                                planned.runner_id, planned.inputs])
-                            if build_key not in binaries:
-                                build_directory = directories[target_key]
-                                context = RunContext(build_directory, parameters(benchmark.build_config),
-                                                     target.commit, benchmark.timeout, benchmark.environment)
-                                contexts.append(context)
-                                binary = Path(benchmark.build(context))
-                                binary = binary if binary.is_absolute() else build_directory / binary
-                                if not binary.is_file():
-                                    raise ValueError("build callback did not produce a file")
-                                if not target.inputs_match(benchmark.inputs, planned.inputs, build_directory):
-                                    raise ValueError("declared inputs changed during the build")
-                                binaries[build_key] = binary
-                            binary = binaries[build_key]
-                            row["binary_sha256"] = file_digest(binary)
-                        directory = checkout.enter_context(target.checkout()) if parallel else directories[target_key]
-                        if not target.inputs_match(benchmark.inputs, planned.inputs, directory):
-                            raise ValueError("declared inputs changed while preparing the target")
-                        arguments = (directory, planned.config, target.commit,
-                                     benchmark.timeout, dict(benchmark.environment), binary)
+                        arguments = attempt.prepare(stack, directories, binaries, parallel=parallel)
                         if parallel:
-                            worker = Worker(benchmark.run, arguments)
-                            pending[worker] = (planned, row, started, directory, contexts, checkout)
+                            pending[Worker(benchmark.run, arguments)] = attempt
                             continue
                         outcome = measure(benchmark.run, arguments)
                     except KeyboardInterrupt:
                         with ignore_interrupts():
-                            finish((planned, row, started, directory, contexts, checkout),
-                                   Outcome(status="interrupted", error="interrupted by user"))
+                            attempt.finish(store, Outcome(status="interrupted", error="interrupted by user"))
                         raise
                     except Exception as error:
                         outcome = Outcome(status=error.result.status if isinstance(error, ProcessError) else "failure",
                                           error=str(error))
-                    finish((planned, row, started, directory, contexts, checkout), outcome)
+                    attempt.finish(store, outcome)
                     if outcome.status == "interrupted":
                         raise KeyboardInterrupt
                 while pending:
@@ -449,16 +457,16 @@ class _Runner:
                         for attempt, outcome in outcomes:
                             if outcome.status == "failure":
                                 outcome.status = "interrupted"
-                            finish(attempt, outcome)
+                            attempt.finish(store, outcome)
                         for planned in plan.runs.values():
                             if planned.key in attempts and attempts[planned.key]["status"] == "pending":
                                 row = attempts[planned.key]
                                 row.update(status="interrupted", finished_at=now(), error="evaluation stopped before collection")
-                                self._replace_rows(store, row, planned.fallback["interrupted"])
+                                _replace_rows(store, row, planned.fallback["interrupted"])
                         store.save()
                     finally:
                         stack.close()
-        return collected
+        return len(attempts)
 
     @staticmethod
     def _selections(plan: Plan) -> dict:

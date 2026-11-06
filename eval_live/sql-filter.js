@@ -1,4 +1,4 @@
-/* Part of eval-live -- SQL WHERE-clause filter (AlaSQL) + checkbox-clause helpers.
+/* Part of eval-live -- SQL WHERE-clause filter (AlaSQL).
    Loaded as a plain <script> (global functions, no ES modules): js() concatenates
    all modules into one inline tag; index.html loads them as separate <script src>. */
 
@@ -36,23 +36,4 @@ function sqlMatchSet(text, rows) {
   } finally {
     alasql.options.cache = cache;
   }
-}
-
-/* Checkbox dropdowns edit recognized column clauses in the SQL filter box. */
-
-function sqlLiteral(value) {
-  if (typeof value === "string") return "'" + value.replace(/'/g, "''") + "'";
-  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-  return String(value);
-}
-
-// Empty selections mean no constraint. Null also represents missing cells.
-// IN preserves scalar types in AlaSQL (equality uses JavaScript coercion).
-function clauseForColumn(col, checkedValues) {
-  if (checkedValues.length === 0) return "";
-  const values = checkedValues.filter((value) => value !== null);
-  const clauses = [];
-  if (values.length) clauses.push(`[${col}] IN (${values.map(sqlLiteral).join(", ")})`);
-  if (checkedValues.includes(null)) clauses.push(`[${col}] IS NULL`);
-  return clauses.length > 1 ? `(${clauses.join(" OR ")})` : clauses[0];
 }

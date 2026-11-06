@@ -172,7 +172,8 @@ for _item in {descriptors!r}:
     _reg._add(_item["kind"], _item["title"], getattr(report, _item["render"]),
               None, _item["id"], _item["caption"],
               getattr(report, _item["filter"]) if _item["filter"] else None)
-eval_live.registry = _reg._bind({selections!r})
+_reg._selections = {selections!r}
+eval_live.registry = _reg
 '''
     modules = {"_eval_live_report.py": script}
     library = pyodide_lib()
@@ -201,7 +202,7 @@ eval_live.registry = _reg._bind({selections!r})
     return destination
 
 
-def render_outputs(data: dict, outputs: Sequence[_Output], output: str | Path, *,
+def render_outputs(data: dict, registry: Registry, output: str | Path, *,
                    fmt: str = "pdf", dpi: int = 150, table_json: bool = False) -> list[Path]:
     """Replace generated files using supplied data and return their paths.
 
@@ -210,12 +211,13 @@ def render_outputs(data: dict, outputs: Sequence[_Output], output: str | Path, *
     a LaTeX file. Exceptions leave no generated report. No measurements are run.
     """
     output = Path(output)
-    with output_directory(output, outputs, fmt=fmt, table_json=table_json) as staging:
-        written, _ = _render_outputs(data, outputs, staging, fmt=fmt, dpi=dpi, table_json=table_json)
+    with output_directory(output, registry._outputs, fmt=fmt, table_json=table_json) as staging:
+        written, _ = _render_outputs(data, registry, staging, fmt=fmt, dpi=dpi, table_json=table_json,
+                                     capture_errors=False)
     return [output / path.name for path in written]
 
 
-def _render_outputs(data, outputs, output, *, fmt="pdf", dpi=150, table_json=False):
+def _render_outputs(data, registry, output, *, fmt="pdf", dpi=150, table_json=False, capture_errors=True):
     """Write to a staging directory and return paths plus console table entries.
 
     Console entries hold the values already exported to files, so printing them
@@ -224,8 +226,8 @@ def _render_outputs(data, outputs, output, *, fmt="pdf", dpi=150, table_json=Fal
     written = []
     tables = []
     macro_names = set()
-    for artifact in outputs:
-        value = artifact.render(data)
+    for artifact in registry._outputs:
+        value = registry._evaluate(artifact, data, capture_errors=capture_errors)
         if artifact.kind == "graph":
             if value is None:
                 continue
@@ -238,9 +240,7 @@ def _render_outputs(data, outputs, output, *, fmt="pdf", dpi=150, table_json=Fal
             path = output / f"{artifact.id}.{fmt}"
             atomic_write(path, buffer.getvalue())
         elif artifact.kind == "table":
-            if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
-                raise ValueError("table callbacks must return a list of row dictionaries")
-            tables.append((artifact.title, lambda _data, rows=value: rows, None, artifact.caption))
+            tables.append(artifact.table_result(value))
             if table_json:
                 if not value:
                     continue
@@ -251,8 +251,7 @@ def _render_outputs(data, outputs, output, *, fmt="pdf", dpi=150, table_json=Fal
             path = output / f"{artifact.id}.tex"
             atomic_write(path, latex.table(value, columns) if columns else "% No matching rows.\n")
         elif artifact.kind == "macros":
-            rows = [{"macro": name, "value": item} for name, item in value.items()]
-            tables.append((artifact.title, lambda _data, rows=rows: rows, None, artifact.caption))
+            tables.append(artifact.table_result(value))
             lines = []
             for name, item in value.items():
                 if not re.fullmatch(r"[A-Za-z]+", name) or name in macro_names:
@@ -286,13 +285,13 @@ def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
             print(f"{level.upper()}: {text}", file=sys.stderr)
 
     registry._message_handler = message
-    bound = registry._bind(selections)
+    registry._selections = selections
     try:
         with output_directory(output, artifacts) as staging:
-            written, tables = _render_outputs(data, bound._outputs, staging)
+            written, tables = _render_outputs(data, registry, staging)
             if artifacts:
                 from . import console
-                console.render(tables, data)
+                console.render(tables)
                 written.append(write_html(staging / "index.html", data, artifacts, selections,
                                           source=source, title=title))
             if registry.run_messages()[1]["rows"]:

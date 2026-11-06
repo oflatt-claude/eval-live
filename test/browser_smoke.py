@@ -50,7 +50,15 @@ def main():
                 .find(el => el.querySelector('.table-title').textContent === 'measurements')
                 .querySelector('.row-count').textContent.includes('18/27')""", timeout=15000)
             assert summary.locator("tbody tr:visible").count() == 4
-            assert "'500'" not in summary.locator(".sql-filter-input").input_value()
+            assert summary.locator(".sql-filter-input").input_value() == ""
+            sql = summary.locator(".sql-filter-input")
+            sql.evaluate("input => window.activeFilterInput = input")
+            sql.fill("algorithm = 'set'")
+            page.wait_for_function("""() => Array.from(document.querySelectorAll('.raw-container .table-section'))
+                .find(el => el.querySelector('.table-title').textContent === 'measurements')
+                .querySelector('.row-count').textContent.includes('12/27')""", timeout=15000)
+            assert sql.evaluate("input => input === window.activeFilterInput && document.activeElement === input")
+            assert not sizes.locator("label").filter(has_text="8000").locator("input").is_checked()
             page.get_by_text("Clear all filters", exact=True).click()
             page.wait_for_selector(".graph-display img", timeout=15000)
             print("Browser: both graphs, typed checkboxes, and filtering across commits passed.")

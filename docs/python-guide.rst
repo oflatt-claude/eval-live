@@ -429,10 +429,12 @@ Treatment selectors can be lambdas or closures: replay does not execute them.
 Checkbox filters preserve scalar types: a number and its string spelling are
 separate choices, as are differently capitalized strings. Null and missing cells
 share an option; the empty string is separate. Clearing every checkbox removes
-that column's constraint, as does selecting every option. Generated predicates
-appear in the SQL box and can be edited there. While a computed filter is being
-applied, affected raw rows and computed results stay hidden until the report is
-ready; a failed calculation does not display stale values.
+that column's constraint, as does selecting every option. Checkbox selections,
+column text filters, and the SQL box apply together: a row must pass all of them.
+Editing one leaves the others unchanged; Clear all filters resets them all.
+While a computed filter is being applied, affected raw rows and computed results
+stay hidden until the report is ready; a failed calculation does not display
+stale values. Filter controls remain editable when no rows match.
 
 ``requires`` selects treatments before collection and limits each rendering
 callback to its selected data. Browser filtering does not change these
@@ -471,8 +473,8 @@ when the calculation for the current filters finishes; results from an older
 filter selection are discarded. Raw tables, computed tables, and diagnostics
 have separate filter controls even when their names match.
 In SQL filters, quote column names that are reserved words or contain spaces,
-for example ``[value] > 10`` or ``[time (ms)] < 1``. Checkbox filters quote names
-automatically.
+for example ``[value] > 10`` or ``[time (ms)] < 1``. Checkbox choices do not
+require SQL syntax.
 
 Open the HTML directly. Raw tables need no Python runtime; computed tables and
 graphs fetch Pyodide and matplotlib from a pinned CDN. The browser never runs

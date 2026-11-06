@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from types import MappingProxyType
 from typing import Any, Iterator, Mapping
 
 Scalar = str | int | float | bool | None
@@ -41,6 +42,23 @@ def parameters(values: Mapping[str, Any]) -> dict:
         result[name] = ([scalar(item) for item in value]
                         if isinstance(value, (list, tuple)) else scalar(value))
     return result
+
+
+def readonly_parameters(values: Mapping[str, Any]) -> Mapping:
+    """Normalize parameters into a read-only mapping with immutable sequences."""
+    return MappingProxyType({key: tuple(value) if isinstance(value, list) else value
+                             for key, value in parameters(values).items()})
+
+
+def run_identity(*, repository, commit, dirty, benchmark, runner_id, config_id, inputs, environment_id) -> dict:
+    """Describe measurement identity for both planning and saved-run validation.
+
+    Timeout is separate: eligibility depends on the outcome and requested
+    deadline. Field names here are part of the persistent cache format.
+    """
+    return {"repository": repository, "commit": commit, "dirty": dirty,
+            "benchmark": benchmark, "runner": runner_id, "config": config_id,
+            "inputs": inputs, "environment": environment_id}
 
 
 def digest(value: Any) -> str:
@@ -262,10 +280,9 @@ class Store:
             if row["status"] == "success" and (type(row["seconds"]) not in (int, float) or row["seconds"] < 0):
                 raise ValueError("successful run must have a duration")
             inputs = inputs_by_run.get(row["run_id"], [])
-            identity = {"repository": row["repository"], "commit": row["commit"],
-                        "dirty": row["dirty"], "benchmark": row["benchmark"],
-                        "runner": row["runner_id"], "config": row["config_id"], "inputs": inputs,
-                        "environment": row["environment_id"]}
+            identity = run_identity(repository=row["repository"], commit=row["commit"], dirty=row["dirty"],
+                                    benchmark=row["benchmark"], runner_id=row["runner_id"],
+                                    config_id=row["config_id"], inputs=inputs, environment_id=row["environment_id"])
             expected = digest(identity)
             # Early schema-1 files included the deadline in the stored key.
             # Index them by the new identity without rewriting observations.
