@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import hashlib
-import inspect
 import math
 import os
 from pathlib import Path
@@ -12,7 +10,7 @@ import subprocess
 import time
 from typing import Callable, Mapping, Sequence
 
-from .store import Data, digest, parameters, readonly_parameters, validate_tables
+from .store import Data, readonly_parameters, validate_tables
 
 
 @dataclass
@@ -88,26 +86,17 @@ def run_command(argv: Sequence[str | Path], *, cwd: str | Path | None = None,
     return result
 
 
-def callable_identity(function: Callable) -> str:
-    """Hash a callback's source. Opaque callables require an explicit wrapper."""
-    try:
-        source = inspect.getsource(function)
-    except (OSError, TypeError) as error:
-        raise ValueError("benchmark callbacks must have inspectable Python source") from error
-    return digest({"name": function.__qualname__, "source": source})
-
-
 @dataclass(frozen=True)
 class Benchmark:
     """Collect one observation with ``run(context) -> named flat tables``.
 
     ``version`` is the explicit data format/measurement protocol version,
     stored as ``eval_runs.data_version`` and included in cache identity. Bump
-    it when the returned tables change shape or meaning. Declare helper
-    functions in ``dependencies`` and input paths in ``inputs`` so changes
-    invalidate the cache. Relative input paths refer to the benchmarked commit;
-    absolute paths refer to external files. ``environment`` records execution
-    variables and ``tools`` records toolchain/dependency versions.
+    it when collector/build/helper code, measurement protocol, or returned tables
+    change. Callback source is not inspected or hashed. Workload sources and
+    data must be committed and read from ``context.directory``. Authors must pin
+    dependencies and avoid modifying tracked files. ``environment`` records
+    execution variables and ``tools`` records toolchain/dependency versions.
 
     Optional ``build(context) -> Path`` receives ``build_config`` and runs once
     per target/build identity. The resulting binary is ``context.binary`` in
@@ -127,8 +116,6 @@ class Benchmark:
     run: Callable[[RunContext], Data]
     version: str
     error_rows: Callable[[Mapping, str], Data]
-    inputs: Sequence[str | Path] = ()
-    dependencies: Sequence[Callable] = ()
     build: Callable[[RunContext], Path] | None = None
     build_config: Mapping = field(default_factory=dict)
     environment: Mapping[str, str] = field(default_factory=dict)
@@ -148,16 +135,6 @@ class Benchmark:
             raise ValueError("environment keys and values must be strings")
         for name in ("build_config", "tools", "environment"):
             object.__setattr__(self, name, readonly_parameters(getattr(self, name)))
-        object.__setattr__(self, "inputs", tuple(self.inputs))
-        object.__setattr__(self, "dependencies", tuple(self.dependencies))
-
-    def identity(self) -> str:
-        """Fingerprint measurement and declared helper code independently of plots."""
-        return digest({"version": self.version, "run": callable_identity(self.run),
-                       "error_rows": callable_identity(self.error_rows),
-                       "helpers": [callable_identity(fn) for fn in self.dependencies],
-                       "build": callable_identity(self.build) if self.build else None,
-                       "build_config": parameters(self.build_config)})
 
     def fallback(self, config: Mapping, status: str) -> Data:
         """Construct explicit rows for an unfinished or unsuccessful treatment."""
@@ -197,12 +174,3 @@ class RunContext:
         if check and result.status != "success":
             raise ProcessError(result)
         return result
-
-
-def file_digest(path: Path) -> str:
-    """Hash a file without loading the whole file into memory."""
-    value = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            value.update(chunk)
-    return value.hexdigest()

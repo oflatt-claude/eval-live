@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import eval_live
 from eval_live.benchmarks import ProcessInterrupted, ProcessResult
-from eval_live.store import atomic_write, digest, parameter_rows, read_parameters
+from eval_live.store import atomic_write, parameter_rows, read_parameters
 
 CALLS = []
 BUILDS = []
@@ -108,11 +108,6 @@ def use_binary(context):
 
 def invalid(context):
     return {"measurements": [{"nested": [1, 2]}]}
-
-
-def mutate_input(context):
-    (context.directory / "value.txt").write_text("changed")
-    return {"measurements": [{"value": 99}]}
 
 
 def table(data):
@@ -244,7 +239,7 @@ class EvaluationTests(unittest.TestCase):
         if registry is None:
             registry = eval_live.Registry(**kwargs)
             registry.table("values", table, requires=request or self.request(), id='values')
-        options = vars(benchmark or eval_live.Benchmark("read", collect, "1", inputs=["value.txt"], error_rows=error_rows)).copy()
+        options = vars(benchmark or eval_live.Benchmark("read", collect, "1", error_rows=error_rows)).copy()
         options["fn"] = options.pop("run")
         registry.benchmark(**options, treatments=self.treatments, repository=self.repo)
         return registry
@@ -263,7 +258,7 @@ class EvaluationTests(unittest.TestCase):
     def parallel_registry(self, treatments, callback=concurrent_collect, **options):
         reg = eval_live.Registry()
         reg.benchmark("read", callback, version="1", repository=self.repo,
-                      inputs=["value.txt"], treatments=treatments, error_rows=error_rows, **options)
+                      treatments=treatments, error_rows=error_rows, **options)
         reg.table("Values", table, id='values')
         return reg
 
@@ -583,6 +578,7 @@ class EvaluationTests(unittest.TestCase):
             write_html(self.output / "large.html", {"samples": [{"value": value}]},
                        reg._outputs, {"values": {"data": []}})
         reg._benchmarks["read"]["benchmark"]["run"] = large_measurement
+        reg._benchmarks["read"]["benchmark"]["version"] = "2"
         with self.assertRaisesRegex(ValueError, "browser's exact range"):
             self.run_eval(reg, render=True)
         self.assertEqual(self.stored()["measurements"][-1]["value"], 2**53 + 1)
@@ -748,21 +744,18 @@ class EvaluationTests(unittest.TestCase):
             self.run_eval(only=["missing"])
         self.assertEqual(len(CALLS), 1)
 
-    def test_configuration_inputs_and_unknown_arguments_invalidate(self):
+    def test_configuration_environment_and_unknown_arguments_invalidate(self):
         self.run_eval()
         self.run_eval(self.evaluation(self.request(factor=2)))
         for argument in ("temperature", "baseline"):
             self.run_eval(**{argument: 3})
         self.assertEqual(len(CALLS), 4)
-        external = self.root / "input.txt"
-        external.write_text("first")
-        benchmark = eval_live.Benchmark("read", collect, "1", inputs=[external], error_rows=error_rows)
-        self.run_eval(self.evaluation(benchmark=benchmark))
-        external.write_text("second")
-        self.run_eval(self.evaluation(benchmark=benchmark))
-        self.assertEqual(len(CALLS), 6)
-        result = self.run_eval(self.evaluation(benchmark=benchmark), only=["values"])
-        self.assertEqual(result.collected, 0)
+        for options in ({"tools": {"solver": "2"}}, {"environment": {"MODE": "proofs"}},
+                        {"build_config": {"optimize": True}}):
+            benchmark = eval_live.Benchmark("read", collect, "1", error_rows=error_rows, **options)
+            self.assertEqual(self.run_eval(self.evaluation(benchmark=benchmark)).collected, 1)
+            self.assertEqual(self.run_eval(self.evaluation(benchmark=benchmark), only=["values"]).reused, 1)
+        self.assertEqual(len(CALLS), 7)
 
     def test_plot_changes_and_output_path_do_not_invalidate(self):
         self.run_eval()
@@ -787,15 +780,11 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual((self.repo / "value.txt").read_text(), "999")
         self.assertEqual(before, self.git("worktree", "list", "--porcelain"))
 
-    def test_dirty_worktree_requires_opt_in_and_never_reuses(self):
-        (self.repo / "value.txt").write_text("30")
-        evaluation = self.evaluation(self.request(commit="WORKTREE"))
-        with self.assertRaisesRegex(ValueError, "dirty"):
-            self.run_eval(evaluation)
-        self.run_eval(evaluation, allow_dirty=True)
-        self.run_eval(evaluation, allow_dirty=True)
-        self.assertEqual(len(CALLS), 2)
-        self.assertTrue(all(not row["cacheable"] for row in self.stored()["eval_runs"]))
+    def test_requested_ref_must_resolve_to_a_commit(self):
+        with self.assertRaises(ValueError):
+            self.run_eval(self.evaluation(self.request(commit="WORKTREE")))
+        self.assertFalse(self.data.exists())
+        self.assertEqual(CALLS, [])
 
     def test_dry_run_never_creates_output_or_runs_benchmark(self):
         result = self.run_eval(dry_run=True)
@@ -820,7 +809,7 @@ class EvaluationTests(unittest.TestCase):
         benchmark = eval_live.Benchmark("read", slow, "1", timeout=0.02, error_rows=error_rows)
         self.run_eval(self.evaluation(benchmark=benchmark))
         self.assertEqual(self.stored()["eval_runs"][0]["status"], "timed-out")
-        self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", invalid, "1", error_rows=error_rows)))
+        self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", invalid, "2", error_rows=error_rows)))
         self.assertTrue(all(row["value"] is None for row in self.stored()["measurements"]))
 
     def test_increasing_timeout_reuses_successes_and_retries_only_timeouts(self):
@@ -893,26 +882,18 @@ class EvaluationTests(unittest.TestCase):
         self.run_eval(evaluation, timeout=600, force=True)
         self.assertEqual(len(CALLS), 2)
 
-    def test_legacy_timeout_keys_are_reused_without_rewriting_observations(self):
-        self.run_eval()
+    def test_older_schema_is_rejected_without_overwriting_data_or_report(self):
+        self.run_eval(render=True)
         data = self.stored()
-        row = data["eval_runs"][0]
-        data.pop("eval_requirements")
-        row.pop("data_version")
-        row["sample"] = 0  # Earlier writers recorded their internal attempt index.
-        row["cache_key"] = digest({
-            "repository": row["repository"], "commit": row["commit"], "dirty": row["dirty"],
-            "benchmark": row["benchmark"], "runner": row["runner_id"], "config": row["config_id"],
-            "inputs": [{"path": item["path"], "sha256": item["sha256"]} for item in data["eval_inputs"]],
-            "environment": row["environment_id"], "timeout": row["timeout"],
-        })
-        self.data.write_text(json.dumps(data))
-        result = self.run_eval(timeout=600)
-        self.assertEqual((result.reused, result.collected), (1, 0))
-        self.assertEqual(self.stored()["eval_runs"][0], row)
-        result = self.run_eval(self.evaluation(self.request(samples=2)), timeout=600)
-        self.assertEqual((result.reused, result.collected), (1, 1))
-        self.assertEqual([row["sample"] for row in self.stored()["measurements"]], [0, 1])
+        data["eval_metadata"][0]["schema_version"] = 1
+        original = json.dumps(data)
+        self.data.write_text(original)
+        report = (self.output / "index.html").read_bytes()
+        with self.assertRaisesRegex(ValueError, "unsupported schema version.*new --data path"):
+            self.run_eval(render=True)
+        self.assertEqual(self.data.read_text(), original)
+        self.assertEqual((self.output / "index.html").read_bytes(), report)
+        self.assertEqual(len(CALLS), 1)
 
     def test_timeout_cli_and_programmatic_validation(self):
         parser = eval_live.add_arguments(argparse.ArgumentParser())
@@ -926,41 +907,17 @@ class EvaluationTests(unittest.TestCase):
                 self.run_eval(timeout=deadline)
         self.assertFalse(self.output.exists())
 
-    def test_committed_directories_ignore_generated_files_and_share_hashes(self):
-        from eval_live.targets import Target
+    def test_generated_files_do_not_prevent_reuse(self):
         (self.repo / "src").mkdir()
         (self.repo / "src/worker.py").write_text("VALUE = 20")
         self.git("add", "src")
         self.commit_value(20)
-        for path in (".", "src"):
-            with self.subTest(path=path):
-                benchmark = eval_live.Benchmark("read", collect_directory, "1", inputs=[path], error_rows=error_rows)
-                reg = self.evaluation(self.request(samples=3), benchmark=benchmark)
-                reg.macros("Count", macros)
-                result = self.run_eval(reg)
-                self.assertEqual(result.collected, 3)
-                self.assertTrue(all(run["status"] == "success" for run in self.stored()["eval_runs"]))
-                hashes, identity = Target.input_hashes, eval_live.Benchmark.identity
-                with patch.object(Target, "input_hashes", autospec=True, side_effect=hashes) as hashed, \
-                        patch.object(eval_live.Benchmark, "identity", autospec=True, side_effect=identity) as identified:
-                    self.assertEqual(reg.plan(args={"output": self.output}).reused, 3)
-                self.assertEqual(hashed.call_count, 1)
-                self.assertEqual(identified.call_count, 1)
-
-    def test_committed_directory_checks_still_reject_tracked_mutations(self):
-        from eval_live.targets import Target
-        target = Target.resolve(self.repo, "HEAD")
-        expected = target.input_hashes(["."])
-        with target.checkout() as directory:
-            self.assertTrue(target.inputs_match(["."], expected, directory))
-            (directory / "generated").write_text("scratch")
-            self.assertTrue(target.inputs_match(["."], expected, directory))
-            (directory / "value.txt").write_text("changed")
-            self.assertFalse(target.inputs_match(["."], expected, directory))
-            self.git("-C", str(directory), "add", "value.txt")
-            self.assertFalse(target.inputs_match(["."], expected, directory))
-            (directory / "value.txt").unlink()
-            self.assertFalse(target.inputs_match(["."], expected, directory))
+        benchmark = eval_live.Benchmark("read", collect_directory, "1", error_rows=error_rows)
+        reg = self.evaluation(self.request(samples=3), benchmark=benchmark)
+        reg.macros("Count", macros)
+        self.assertEqual(self.run_eval(reg).collected, 3)
+        self.assertTrue(all(run["status"] == "success" for run in self.stored()["eval_runs"]))
+        self.assertEqual(reg.plan(args={"output": self.output}).reused, 3)
 
     def test_browser_callback_preflight_checks_only_selected_outputs(self):
         reg = self.evaluation()
@@ -1003,7 +960,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(CALLS), 1)
 
     def test_html_contains_union_of_referenced_runs_and_reachable_provenance(self):
-        benchmark = eval_live.Benchmark("read", logged_collect, "1", inputs=["value.txt"], error_rows=error_rows)
+        benchmark = eval_live.Benchmark("read", logged_collect, "1", error_rows=error_rows)
 
         def evaluation(request=None, registry=None):
             return self.evaluation(request, registry, benchmark=benchmark)
@@ -1039,7 +996,7 @@ class EvaluationTests(unittest.TestCase):
             eval_live.Store(report_path)
             self.assertGreater(len(saved["eval_runs"]), len(embedded["eval_runs"]))
             self.assertEqual(len(embedded["eval_processes"]), expected_count)
-            for name in ("eval_inputs", "eval_processes", "eval_commands"):
+            for name in ("eval_processes", "eval_commands"):
                 self.assertTrue(embedded[name])
                 self.assertTrue(all(row["run_id"] in expected for row in embedded[name]))
             return embedded
@@ -1057,14 +1014,8 @@ class EvaluationTests(unittest.TestCase):
         page = check_report(replay, 3)
         self.assertEqual({row["invocation_id"] for row in page["eval_runs"]}, {original.invocation_id})
 
-    def test_mutating_materialized_inputs_cannot_produce_a_cache_hit(self):
-        benchmark = eval_live.Benchmark("read", mutate_input, "1", inputs=["value.txt"], error_rows=error_rows)
-        self.run_eval(self.evaluation(benchmark=benchmark))
-        self.assertTrue(all(row["value"] is None for row in self.stored()["measurements"]))
-        self.assertEqual(self.stored()["eval_runs"][0]["status"], "failure")
-
     def test_build_shared_across_configs_and_skipped_for_cache_hits(self):
-        benchmark = eval_live.Benchmark("read", use_binary, "1", build=build, inputs=["value.txt"], error_rows=error_rows)
+        benchmark = eval_live.Benchmark("read", use_binary, "1", build=build, error_rows=error_rows)
         requests = [self.request(value=1, samples=2), self.request(value=2)]
         reg = eval_live.Registry()
         reg.table("values", table, requires=lambda ts: [t for select in requests for t in select(ts)], id='values')
@@ -1072,7 +1023,6 @@ class EvaluationTests(unittest.TestCase):
         result = self.run_eval(evaluation)
         self.assertEqual(result.collected, 3)
         self.assertEqual(len(BUILDS), 1)
-        self.assertTrue(all(row["binary_sha256"] for row in self.stored()["eval_runs"]))
         self.assertEqual(self.run_eval(evaluation).collected, 0)
         self.assertEqual(len(BUILDS), 1)
 
@@ -1145,13 +1095,16 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(self.stored()["eval_runs"][0]["status"], "interrupted")
         self.assertEqual(CALLS, [])
 
-    def test_protocol_version_and_helper_code_invalidate_cache(self):
+    def test_collector_changes_require_an_explicit_version_bump(self):
         self.run_eval()
-        result = self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", collect, "2", inputs=["value.txt"], error_rows=error_rows)))
-        self.assertEqual(result.collected, 1)
+        # Sequential collectors need no inspectable source or helper declaration.
+        changed = lambda context: {"measurements": [{"value": 42}]}
+        for version, collected in (("1", 0), ("2", 1), ("2", 0)):
+            benchmark = eval_live.Benchmark("read", changed, version, error_rows=error_rows)
+            result = self.run_eval(self.evaluation(benchmark=benchmark))
+            self.assertEqual(result.collected, collected)
         self.assertEqual([row["data_version"] for row in self.stored()["eval_runs"]], ["1", "2"])
-        result = self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", collect, "2", inputs=["value.txt"], dependencies=[table], error_rows=error_rows)))
-        self.assertEqual(result.collected, 1)
+        self.assertEqual([row["value"] for row in self.stored()["measurements"]], [20, 42])
 
     def test_exports_share_samples_and_write_only_one_json_data_file(self):
         self.run_eval(self.evaluation(self.request(samples=3)))
@@ -1324,11 +1277,11 @@ class StoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             store = eval_live.Store(Path(temporary) / "results.json")
             store.data["eval_runs"] = [
-                dict(run_id="fast", cache_key="key", cacheable=True, status="success", timeout=10, seconds=2),
-                dict(run_id="overhead", cache_key="key", cacheable=True, status="success", timeout=10, seconds=12),
-                dict(run_id="timeout", cache_key="key", cacheable=True, status="timed-out", timeout=10, seconds=10),
-                dict(run_id="error", cache_key="key", cacheable=True, status="failure", timeout=10, seconds=1),
-                dict(run_id="interrupted", cache_key="key", cacheable=True, status="interrupted", timeout=10, seconds=1),
+                dict(run_id="fast", cache_key="key", status="success", timeout=10, seconds=2),
+                dict(run_id="overhead", cache_key="key", status="success", timeout=10, seconds=12),
+                dict(run_id="timeout", cache_key="key", status="timed-out", timeout=10, seconds=10),
+                dict(run_id="error", cache_key="key", status="failure", timeout=10, seconds=1),
+                dict(run_id="interrupted", cache_key="key", status="interrupted", timeout=10, seconds=1),
             ]
             def select(deadline):
                 return [row["run_id"] for row in store.cached("key", timeout=deadline)]

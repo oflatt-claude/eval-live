@@ -45,7 +45,7 @@ Each selected treatment invokes the registered callback once:
 
    reg = eval_live.Registry()
    reg.benchmark(
-       "worker", collect, version="1", error_rows=error_rows, inputs=["worker.py"],
+       "worker", collect, version="1", error_rows=error_rows,
        treatments=[{"suite": suite, "size": size}
                    for suite in ("a", "b") for size in (100, 1000)],
    )
@@ -66,18 +66,22 @@ stdout, and stderr. Nonzero exits and timeouts raise ``ProcessError``.
 the repository; output selectors can add or change their commit.
 Selectors see those fields and ``benchmark`` alongside the treatment's own
 parameters; these three reserved fields are omitted from ``context.config``.
-Refs resolve to full SHAs before cache lookup. ``WORKTREE`` explicitly selects
-working files; dirty collection requires ``--allow-dirty`` and bypasses reuse.
+Refs resolve to full SHAs before cache lookup. Collection always uses temporary
+worktrees of committed revisions; uncommitted changes in your checkout are
+ignored and left untouched.
 
-Declare helper functions with ``dependencies``, external files/directories
-with ``inputs``, toolchain versions with ``tools``, and execution variables
-with ``environment``. Relative input paths are read at the target commit;
-absolute inputs are hashed from the filesystem. For a committed directory,
-only tracked files are inputs: generated files such as ``__pycache__`` do not
-invalidate it. Tracked-file changes found after a build or collector produce
-failure rows. Absolute directories and ``WORKTREE`` use filesystem contents,
-including untracked files. The library cannot infer undeclared globals,
-dependencies, or external services.
+Commit workload source and data, pin dependencies, and read them from
+``context.directory``. Keep tracked files unchanged during builds and collection;
+use scratch files or temporary directories for generated output. The commit
+identifies file contents: eval-live does not inspect dependencies, hash files,
+or detect modifications made by callbacks. External files or services are the
+author's responsibility and must have immutable versions recorded in configuration.
+Record toolchain versions with ``tools`` and execution variables with ``environment``.
+
+Collector and build callbacks execute from the current evaluation script, even
+when a treatment selects an older workload commit. Their source is not hashed.
+Bump ``version`` whenever those callbacks, their helpers, or the measurement
+protocol change; see `Version the collected tables`_.
 
 An optional ``build(context) -> Path`` receives ``build_config`` and prepares
 ``context.binary``. Builds share work across compatible treatments in an
@@ -207,9 +211,9 @@ with ``Registry(selection_arguments=[...])``. The demo excludes the whole
 ``sizes`` list because each individual size is already a treatment field. It
 keeps the total sample count in the configuration key.
 
-The cache also includes repository/full commit, collection and declared helper
-code, declared data version, input hashes, and relevant environment/tool
-settings. Plot code and selectors do not affect measurement identity.
+The cache also includes repository/full commit, benchmark name, declared
+``version``, build configuration, and recorded environment/tool settings.
+Plot code and selectors do not affect measurement identity.
 
 A treatment plus CLI configuration and commit identifies what to collect. A
 table that stores multiple rows for that treatment may additionally distinguish
@@ -222,10 +226,10 @@ Version the collected tables
 
 ``reg.benchmark(..., version="2")`` declares the data format/measurement protocol
 version for the tables that callback returns. It is stored explicitly in
-``eval_runs.data_version`` and included in the runner fingerprint. Bump it when
-tables change shape or meaning, or when an otherwise undeclared protocol change
-requires recollection. Existing observations retain their original version;
-new invocations select data using the current identity. Changes to rendering
+``eval_runs.data_version`` and included in the cache identity. Bump it when
+collector/build/helper code or tables change, including changes to units,
+parsing, error rows, or measurement methodology. Existing observations retain
+their original version; new invocations select data using the current identity. Changes to rendering
 alone reuse data. This version is independent of the JSON container's schema.
 
 Opt in to parallel collection
@@ -248,7 +252,7 @@ before they start, and subsequent workers wait for them to finish.
 Parallel collectors must be importable top-level functions; guard script
 execution with ``if __name__ == '__main__'``. Each committed parallel treatment
 gets its own temporary worktree. Build outputs are shared and should be treated
-as read-only; absolute external paths and ``WORKTREE`` files remain shared.
+as read-only. External resources remain shared.
 Only mark treatments whose shared resources allow concurrent use.
 
 Concurrency can affect measurements, so the flag and resolved worker limit
@@ -382,11 +386,12 @@ writes all evaluation data to one JSON file.
 Avoid misleading results
 ------------------------
 
-Declare every input that can change a measurement: CLI parameters, treatment
-fields, helper ``dependencies``, input files, tool versions, and environment
-variables. A Python global or closure value is not automatically part of the
-cache key. Bump the benchmark's ``version`` when an undeclared change affects
-the measurement protocol, units, or table meaning.
+Keep measurement dependencies committed or pinned, and record parameters in
+CLI arguments, treatment fields, ``tools``, or ``environment``. An external file
+changing at the same path, an unrecorded environment variable, or a changed Python
+global will not invalidate the cache. Bump the benchmark's ``version`` for changes
+to measurement code, protocol, units, or table meaning. The cache assumes the
+author follows this contract; it cannot establish reproducibility by itself.
 
 Preserving rows does not make every aggregation valid. Count requested,
 successful, timed-out, and failed treatments before computing statistics.

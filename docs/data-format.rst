@@ -7,14 +7,14 @@ reserved ``eval_`` names. User tables reference observations through ``run_id``.
 Do not put styled cells, lists, dictionaries, or serialized configuration
 objects in stored cells. Styled cells are allowed in derived presentation tables.
 
-Schema version 1
+Schema version 2
 ----------------
 
 ======================= ======================================================
 Table                   Contents
 ======================= ======================================================
 ``eval_metadata``       Singleton schema and writer versions.
-``eval_invocations``    Invocation identity, timestamps/status, script identity,
+``eval_invocations``    Invocation identity, timestamps/status, script path,
                         script Git revision/dirty state, Python/platform, cwd,
                         and whether collection completed.
 ``eval_argv``           Invocation ID, original token position and token.
@@ -25,9 +25,7 @@ Table                   Contents
 ``eval_environments``   Environment ID and named platform/Python/tool settings.
 ``eval_runs``           Attempt ID, collecting invocation, benchmark, resolved
                         commit/ref, cache identity, configuration/environment,
-                        data version, status, timing, binary hash, error, and
-                        ``has_rows`` for attempts with declared result rows.
-``eval_inputs``         Run ID, declared input path and SHA-256.
+                        data version, status, timing, and error.
 ``eval_selections``     Rendering invocation, artifact, named requirement,
                         position, and selected run ID (fresh or reused).
 ``eval_requirements``   Rendering invocation, artifact, and requirement name,
@@ -52,8 +50,8 @@ Rows and selections
 reused results. Repeated or forced evaluations retain earlier attempts.
 
 Every requested treatment has rows in every table declared by ``error_rows``
-before collection begins. ``has_rows=True`` identifies attempts covered by
-this invariant. ``eval_runs.status`` is one of ``pending``, ``running``,
+before collection begins. This invariant applies to every attempt.
+``eval_runs.status`` is one of ``pending``, ``running``,
 ``success``, ``timed-out``, ``failure``, or ``interrupted``. Error rows satisfy
 output requirements just as measured rows do. Unfinished attempts from a
 stopped writer become ``interrupted`` when the next writer starts.
@@ -82,6 +80,8 @@ Persistence
 ``Store`` validates scalar cells, schema version, identities, parameter
 encoding, provenance links, and cache fingerprints before collection.
 Incompatible data raises an error; it is never silently deleted or converted.
+For an older schema, use a new ``--data`` path for collection and the original
+eval-live version to read the older file.
 The current repository identity is the canonical common Git-directory path,
 so another clone has a separate collection identity. Stored selections remain
 portable for render-only use.
@@ -93,7 +93,7 @@ stops. Benchmark results are stored only in the JSON file.
 
 The generated HTML contains the union of runs referenced by the selected
 figures, tables, and macros. This includes reused attempts and comparisons
-across commits, with their configurations, environments, inputs, command
+across commits, with their configurations, environments, command
 logs, and collecting invocations. It also includes the current invocation's
 arguments and output selections, plus any replay ancestry. Empty requirements
 remain represented. Unrelated attempts and historical output selections stay

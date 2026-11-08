@@ -31,7 +31,7 @@ def error_rows(treatment, status):
                               "seconds": None, "status": status}]}
 
 reg = eval_live.Registry()
-reg.benchmark("worker", collect, version="1", error_rows=error_rows, inputs=["worker.py"],
+reg.benchmark("worker", collect, version="1", error_rows=error_rows,
               treatments=[{"suite": suite, "size": size}
                           for suite in suites for size in sizes])
 reg.graph("Runtime", runtime,
@@ -50,6 +50,16 @@ Repetitions are ordinary treatment fields
 such as `sample`; callbacks compute averages or other statistics. CLI
 measurement parameters—including a script's total sample count—and the
 declared data `version` participate in cache identity and are saved with results.
+
+**Reproducibility contract:** commit workload sources and data, pin dependencies,
+and read them from `context.directory`, the selected commit's temporary worktree.
+Keep tracked files unchanged during builds and collection. Eval-live relies on
+the Git commit; it does not discover dependencies or hash individual files.
+Collector and build callbacks run from the current evaluation script, so bump
+the benchmark's `version` when their code, helpers, or measurement protocol
+changes. Changing only figures does not require a version bump. Record tool
+versions with `tools` and execution variables with `environment` when they
+affect measurements.
 
 Treatments run sequentially by default. Mark a treatment with `parallel=True`
 to allow separate worker processes; `--jobs N` caps concurrency (default: CPU
@@ -104,8 +114,8 @@ separate directories to retain different subsets or comparisons. The HTML embeds
 all runs referenced by those outputs, including cached runs and other commits,
 with their configurations and diagnostics. Unrelated history stays in `results.json`.
 
-Reliable statistics still depend on the evaluation script: declare all
-measurement inputs, count timeouts and failures, join comparisons by treatment
+Reliable statistics still depend on the evaluation script: pin measurement
+dependencies, count timeouts and failures, join comparisons by treatment
 keys, and keep rendering callbacks deterministic. The [Python guide's advice on
 misleading results](docs/python-guide.rst#avoid-misleading-results) explains these
 risks, measurement units, and the browser's integer limits.

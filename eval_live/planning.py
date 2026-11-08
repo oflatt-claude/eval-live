@@ -16,7 +16,7 @@ from typing import Mapping, Sequence
 import uuid
 
 from .eval_live import Registry, _Output
-from .benchmarks import Benchmark, ProcessError, RunContext, file_digest
+from .benchmarks import Benchmark, ProcessError, RunContext
 from .cli import CONTROL_ARGUMENTS
 from .render import browser_callbacks, discard_outputs, render_artifacts, report_data
 from .store import Store, digest, parameter_rows, parameters, readonly_parameters, run_identity
@@ -38,10 +38,8 @@ class PlannedRun:
     config: dict
     arguments: dict
     environment: dict
-    inputs: list[dict]
     config_id: str
     environment_id: str
-    runner_id: str
     selected: dict | None = None
     needed_by: list[str] = field(default_factory=list)
     fallback: dict = field(default_factory=dict)
@@ -65,23 +63,20 @@ class _Attempt:
     planned: PlannedRun
     row: dict
     started: float = field(default_factory=time.perf_counter)
-    directory: Path | None = None
     contexts: list[RunContext] = field(default_factory=list)
     checkout: ExitStack = field(default_factory=ExitStack)
 
     def prepare(self, stack: ExitStack, directories: dict, binaries: dict, *, parallel: bool) -> tuple:
-        """Prepare inputs/builds and return the arguments for a collector context."""
+        """Prepare a checkout/build and return the arguments for a collector context."""
         planned = self.planned
         benchmark, target = planned.benchmark, planned.target
-        target_key = (target.identity, target.commit, target.working)
-        if not target.inputs_match(benchmark.inputs, planned.inputs):
-            raise ValueError("declared inputs changed after planning")
+        target_key = (target.identity, target.commit)
         if (not parallel or benchmark.build) and target_key not in directories:
             directories[target_key] = stack.enter_context(target.checkout())
         binary = None
         if benchmark.build:
-            build_key = digest([*target_key, parameters(benchmark.build_config), planned.environment_id,
-                                planned.runner_id, planned.inputs])
+            build_key = digest([*target_key, benchmark.name, benchmark.version,
+                                parameters(benchmark.build_config), planned.environment_id])
             if build_key not in binaries:
                 build_directory = directories[target_key]
                 context = RunContext(build_directory, parameters(benchmark.build_config),
@@ -91,29 +86,18 @@ class _Attempt:
                 binary = binary if binary.is_absolute() else build_directory / binary
                 if not binary.is_file():
                     raise ValueError("build callback did not produce a file")
-                if not target.inputs_match(benchmark.inputs, planned.inputs, build_directory):
-                    raise ValueError("declared inputs changed during the build")
                 binaries[build_key] = binary
             binary = binaries[build_key]
-            self.row["binary_sha256"] = file_digest(binary)
-        self.directory = self.checkout.enter_context(target.checkout()) if parallel else directories[target_key]
-        if not target.inputs_match(benchmark.inputs, planned.inputs, self.directory):
-            raise ValueError("declared inputs changed while preparing the target")
-        return (self.directory, planned.config, target.commit, benchmark.timeout, dict(benchmark.environment), binary)
+        directory = self.checkout.enter_context(target.checkout()) if parallel else directories[target_key]
+        return (directory, planned.config, target.commit, benchmark.timeout, dict(benchmark.environment), binary)
 
     def finish(self, store: Store, outcome: Outcome) -> None:
         """Checkpoint a completed outcome and release this attempt's checkout."""
         planned, row = self.planned, self.row
         try:
-            if outcome.status == "success":
-                try:
-                    # measure() validates scalar cells in either execution mode.
-                    if any(not outcome.tables.get(name) for name in planned.fallback["pending"]):
-                        raise ValueError("collector must return rows in every table declared by error_rows")
-                    if not planned.target.inputs_match(planned.benchmark.inputs, planned.inputs, self.directory):
-                        raise ValueError("declared inputs changed during collection")
-                except Exception as error:
-                    outcome = Outcome(processes=outcome.processes, status="failure", error=str(error))
+            if outcome.status == "success" and any(not outcome.tables.get(name) for name in planned.fallback["pending"]):
+                outcome = Outcome(processes=outcome.processes, status="failure",
+                                  error="collector must return rows in every table declared by error_rows")
             row.update(status=outcome.status, error=outcome.error,
                        finished_at=now(), seconds=time.perf_counter() - self.started)
             tables = outcome.tables if outcome.status == "success" else planned.fallback[outcome.status]
@@ -191,7 +175,7 @@ class _Runner:
     def _options(args: Namespace | Mapping | None) -> dict:
         supplied = vars(args) if isinstance(args, Namespace) else dict(args or {})
         options = dict(output="out", data=None, only=None, benchmarks=None, force=False,
-                       dry_run=False, render_only=False, invocation=None, allow_dirty=False, timeout=None,
+                       dry_run=False, render_only=False, invocation=None, timeout=None,
                        commit="HEAD", jobs=os.cpu_count() or 1)
         options.update(parameters(supplied))
         if type(options["jobs"]) is not int or options["jobs"] < 1:
@@ -275,8 +259,6 @@ class _Runner:
         plan = Plan(artifacts, {}, {})
         catalog = self._catalog()
         targets = {}
-        input_hashes = {}
-        runner_ids = {}
         for artifact in artifacts:
             plan.requirements[artifact.id] = {}
             for name, selector in artifact.requires.items():
@@ -290,13 +272,8 @@ class _Runner:
                         benchmark = replace(benchmark, timeout=options["timeout"])
                     target_key = (treatment["repository"], treatment["commit"])
                     if target_key not in targets:
-                        targets[target_key] = Target.resolve(*target_key,
-                                                             allow_dirty=options["allow_dirty"])
+                        targets[target_key] = Target.resolve(*target_key)
                     target = targets[target_key]
-                    input_key = (target.identity, target.commit, target.working, benchmark.inputs)
-                    if input_key not in input_hashes:
-                        input_hashes[input_key] = target.input_hashes(benchmark.inputs)
-                    inputs = input_hashes[input_key]
                     environment = {"python": platform.python_version(), "implementation": platform.python_implementation(),
                                    "platform": platform.platform(), "machine": platform.node(),
                                    "executable": sys.executable,
@@ -306,17 +283,13 @@ class _Runner:
                                          if key not in ("benchmark", "repository", "commit")})
                     config_id = digest({"request": config, "arguments": measurement_args,
                                         "build": parameters(benchmark.build_config)})
-                    if benchmark_name not in runner_ids:
-                        runner_ids[benchmark_name] = benchmark.identity()
-                    runner_id = runner_ids[benchmark_name]
                     environment_id = digest(environment)
                     key = digest(run_identity(repository=target.identity, commit=target.commit,
-                                              dirty=target.dirty, benchmark=benchmark.name, runner_id=runner_id,
-                                              config_id=config_id, inputs=inputs, environment_id=environment_id))
+                                              benchmark=benchmark.name, data_version=benchmark.version,
+                                              config_id=config_id, environment_id=environment_id))
                     if key not in plan.runs:
                         plan.runs[key] = PlannedRun(key, benchmark, target, config, measurement_args,
-                                                   environment, inputs, config_id, environment_id,
-                                                   runner_id)
+                                                   environment, config_id, environment_id)
                         fallback = {status: benchmark.fallback(config, status)
                                     for status in ("pending", "timed-out", "failure", "interrupted")}
                         if any(set(tables) != set(fallback["pending"]) for tables in fallback.values()):
@@ -326,10 +299,9 @@ class _Runner:
                     reason = f"{artifact.id}/{name}"
                     if reason not in run.needed_by:
                         run.needed_by.append(reason)
-                    if not target.dirty and not options["force"]:
+                    if not options["force"]:
                         cached = store.cached(key, timeout=benchmark.timeout)
-                        latest = cached[-1] if cached else None
-                        run.selected = latest if latest and (latest["status"] == "success" or latest.get("has_rows")) else None
+                        run.selected = cached[-1] if cached else None
                     if key not in requirements:
                         requirements.append(key)
                 plan.requirements[artifact.id][name] = requirements
@@ -349,7 +321,7 @@ class _Runner:
             filename = inspect.getsourcefile(self.artifacts[0].render)
             script = Path(filename).resolve() if filename else None
         invocation = dict(invocation_id=str(uuid.uuid4()), started_at=now(), finished_at=None,
-                          status="running", cwd=str(Path.cwd()), python=platform.python_version(),
+                          status="running", collection_complete=False, cwd=str(Path.cwd()), python=platform.python_version(),
                           platform=platform.platform(), **script_revision(script))
         store.data["eval_invocations"].append(invocation)
         store.data["eval_arguments"].extend(parameter_rows(options, invocation_id=invocation["invocation_id"]))
@@ -388,14 +360,13 @@ class _Runner:
                 environments.add(planned.environment_id)
             benchmark, target = planned.benchmark, planned.target
             row = dict(run_id=str(uuid.uuid4()), invocation_id=invocation["invocation_id"],
-                       cache_key=planned.key, cacheable=not target.dirty, benchmark=benchmark.name,
+                       cache_key=planned.key, benchmark=benchmark.name,
                        repository=target.identity, requested_ref=target.ref, commit=target.commit,
-                       dirty=target.dirty, runner_id=planned.runner_id, data_version=benchmark.version,
+                       data_version=benchmark.version,
                        config_id=planned.config_id, environment_id=planned.environment_id,
                        timeout=benchmark.timeout, started_at=None, finished_at=None,
-                       status="pending", seconds=None, binary_sha256=None, error=None, has_rows=True)
+                       status="pending", seconds=None, error=None)
             store.data["eval_runs"].append(row)
-            store.data["eval_inputs"].extend(dict(item, run_id=row["run_id"]) for item in planned.inputs)
             _replace_rows(store, row, planned.fallback["pending"])
             planned.selected = row
             attempts[planned.key] = row
@@ -502,7 +473,7 @@ class _Runner:
         saved = options["invocation"]
         if saved is None:
             candidates = [row for row in store.data["eval_invocations"]
-                          if row.get("collection_complete", row["status"] == "success")]
+                          if row["collection_complete"]]
             if not candidates:
                 raise ValueError("no completed invocation to render")
             saved = candidates[-1]["invocation_id"]

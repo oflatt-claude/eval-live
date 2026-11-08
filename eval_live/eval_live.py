@@ -277,9 +277,10 @@ class Registry:
         importable top-level functions. The flag and worker limit are saved
         with the configuration and affect cache identity.
 
-        ``version`` identifies the tables' format/meaning and affects cache
-        identity. Options are fields of :class:`eval_live.Benchmark`:
-        ``inputs``, ``dependencies``, ``build``,
+        ``version`` identifies the measurement protocol and tables' format/meaning.
+        Bump it when collector/build/helper code changes. Workload sources and
+        data must be committed; collection reads the selected commit's worktree.
+        Options are fields of :class:`eval_live.Benchmark`: ``build``,
         ``build_config``, ``environment``, ``tools``, and ``timeout`` (seconds
         per command, default None for no limit). Registration does not collect.
         Omit ``fn`` to use ``@reg.benchmark(name, version=..., ...)``.

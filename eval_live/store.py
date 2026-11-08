@@ -14,10 +14,10 @@ from typing import Any, Iterator, Mapping
 
 Scalar = str | int | float | bool | None
 Data = dict[str, list[dict[str, Scalar]]]
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SYSTEM_TABLES = (
     "eval_metadata", "eval_invocations", "eval_argv", "eval_arguments",
-    "eval_configs", "eval_environments", "eval_inputs", "eval_runs",
+    "eval_configs", "eval_environments", "eval_runs",
     "eval_selections", "eval_requirements", "eval_processes", "eval_commands",
 )
 
@@ -50,15 +50,14 @@ def readonly_parameters(values: Mapping[str, Any]) -> Mapping:
                              for key, value in parameters(values).items()})
 
 
-def run_identity(*, repository, commit, dirty, benchmark, runner_id, config_id, inputs, environment_id) -> dict:
+def run_identity(*, repository, commit, benchmark, data_version, config_id, environment_id) -> dict:
     """Describe measurement identity for both planning and saved-run validation.
 
     Timeout is separate: eligibility depends on the outcome and requested
     deadline. Field names here are part of the persistent cache format.
     """
-    return {"repository": repository, "commit": commit, "dirty": dirty,
-            "benchmark": benchmark, "runner": runner_id, "config": config_id,
-            "inputs": inputs, "environment": environment_id}
+    return {"repository": repository, "commit": commit, "benchmark": benchmark,
+            "version": data_version, "config": config_id, "environment": environment_id}
 
 
 def digest(value: Any) -> str:
@@ -169,7 +168,6 @@ class Store:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser().resolve()
         self._writing = False
-        self._run_keys: dict[str, str] = {}
         self.reload()
 
     def reload(self) -> None:
@@ -177,12 +175,6 @@ class Store:
         if self.path.exists():
             try:
                 self.data = json.loads(self.path.read_text(encoding="utf-8"))
-                # Earlier schema-1 writers only stored nonempty selections.
-                if isinstance(self.data, dict) and "eval_requirements" not in self.data:
-                    keys = ("invocation_id", "artifact_id", "requirement")
-                    scopes = dict.fromkeys(tuple(row[key] for key in keys)
-                                          for row in self.data.get("eval_selections", []))
-                    self.data["eval_requirements"] = [dict(zip(keys, scope)) for scope in scopes]
                 self.validate()
             except (ValueError, TypeError, KeyError) as error:
                 raise ValueError(f"invalid or incompatible eval-live data in {self.path}: {error}") from error
@@ -193,13 +185,14 @@ class Store:
     def validate(self) -> None:
         """Reject unsupported schemas, malformed identities, and dangling links."""
         validate_tables(self.data)
+        meta = self.data.get("eval_metadata", [])
+        if len(meta) != 1 or type(meta[0].get("schema_version")) is not int or meta[0]["schema_version"] != SCHEMA_VERSION:
+            raise ValueError(f"unsupported schema version; expected {SCHEMA_VERSION}. "
+                             "Use a new --data path, or the original eval-live version to read this file")
         if set(SYSTEM_TABLES) - self.data.keys():
             raise ValueError("missing metadata tables")
         if any(name.startswith("eval_") and name not in SYSTEM_TABLES for name in self.data):
             raise ValueError("unknown reserved metadata table")
-        meta = self.data["eval_metadata"]
-        if len(meta) != 1 or type(meta[0].get("schema_version")) is not int or meta[0]["schema_version"] != SCHEMA_VERSION:
-            raise ValueError("unsupported schema version")
 
         def identities(table, key):
             values = [row[key] for row in self.data[table]]
@@ -212,15 +205,11 @@ class Store:
         processes = identities("eval_processes", "process_id")
         configs = {row["config_id"] for row in self.data["eval_configs"]}
         environments = {row["environment_id"] for row in self.data["eval_environments"]}
-        run_by_id = {row["run_id"]: row for row in self.data["eval_runs"]}
-        inputs_by_run = {}
-        for row in self.data["eval_inputs"]:
-            if not isinstance(row["path"], str) or not isinstance(row["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"]):
-                raise ValueError("invalid declared input fingerprint")
-            inputs_by_run.setdefault(row["run_id"], []).append({"path": row["path"], "sha256": row["sha256"]})
         for row in self.data["eval_invocations"]:
             if row["status"] not in ("running", "success", "failure", "interrupted"):
                 raise ValueError("invalid invocation status")
+            if type(row["collection_complete"]) is not bool:
+                raise ValueError("invalid collection status")
             if "source_invocation" in row and row["source_invocation"] not in invocations:
                 raise ValueError("rendering invocation refers to a missing source")
         parameter_tables = (("eval_arguments", "invocation_id"), ("eval_configs", "config_id"),
@@ -251,44 +240,31 @@ class Store:
                     raise ValueError(f"dangling run in {table}")
                 if table not in SYSTEM_TABLES and "run_id" not in row:
                     raise ValueError(f"missing run_id in {table}")
-        run_keys = {}
         represented_runs = {row["run_id"] for name, rows in self.data.items()
                             if not name.startswith("eval_") for row in rows}
         for row in self.data["eval_runs"]:
-            if "has_rows" in row and (type(row["has_rows"]) is not bool or
-                    (row["has_rows"] and row["run_id"] not in represented_runs)):
+            if row["run_id"] not in represented_runs:
                 raise ValueError("attempt is missing its declared result rows")
             if row["config_id"] not in configs or row["environment_id"] not in environments:
                 raise ValueError("run has no configuration or environment")
             if row["status"] not in ("pending", "running", "success", "failure", "timed-out", "interrupted"):
                 raise ValueError("invalid run status")
-            if "sample" in row and (type(row["sample"]) is not int or row["sample"] < 0):
-                raise ValueError("invalid legacy sample index")
-            if "data_version" in row and (not isinstance(row["data_version"], str) or not row["data_version"]):
-                raise ValueError("invalid data version")
-            if not isinstance(row["cache_key"], str) or type(row["cacheable"]) is not bool:
+            if not isinstance(row["cache_key"], str):
                 raise ValueError("invalid cache identity")
-            if type(row["dirty"]) is not bool or (row["dirty"] and row["cacheable"]):
-                raise ValueError("dirty observations must not be reusable")
             if not isinstance(row["commit"], str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", row["commit"]):
                 raise ValueError("run must record a full commit hash")
-            for key in ("benchmark", "repository", "runner_id", "requested_ref"):
+            for key in ("benchmark", "repository", "data_version", "requested_ref"):
                 if not isinstance(row[key], str) or not row[key]:
                     raise ValueError(f"invalid run {key}")
             if row["timeout"] is not None and (type(row["timeout"]) not in (int, float) or row["timeout"] <= 0):
                 raise ValueError("invalid run timeout")
             if row["status"] == "success" and (type(row["seconds"]) not in (int, float) or row["seconds"] < 0):
                 raise ValueError("successful run must have a duration")
-            inputs = inputs_by_run.get(row["run_id"], [])
-            identity = run_identity(repository=row["repository"], commit=row["commit"], dirty=row["dirty"],
-                                    benchmark=row["benchmark"], runner_id=row["runner_id"],
-                                    config_id=row["config_id"], inputs=inputs, environment_id=row["environment_id"])
-            expected = digest(identity)
-            # Early schema-1 files included the deadline in the stored key.
-            # Index them by the new identity without rewriting observations.
-            if row["cache_key"] not in (expected, digest({**identity, "timeout": row["timeout"]})):
+            identity = run_identity(repository=row["repository"], commit=row["commit"],
+                                    benchmark=row["benchmark"], data_version=row["data_version"],
+                                    config_id=row["config_id"], environment_id=row["environment_id"])
+            if row["cache_key"] != digest(identity):
                 raise ValueError("cache identity does not match run provenance")
-            run_keys[row["run_id"]] = expected
         requirement_keys = ("invocation_id", "artifact_id", "requirement")
         requirements = [tuple(row[key] for key in requirement_keys) for row in self.data["eval_requirements"]]
         if len(set(requirements)) != len(requirements) or any(
@@ -299,9 +275,6 @@ class Store:
         for row in self.data["eval_selections"]:
             if tuple(row[key] for key in requirement_keys) not in requirements:
                 raise ValueError("selection has no output requirement")
-            run = run_by_id[row["run_id"]]
-            if run["status"] != "success" and not run.get("has_rows", False):
-                raise ValueError("selection refers to an attempt without result rows")
             for key in ("artifact_id", "requirement"):
                 if not isinstance(row[key], str) or not row[key]:
                     raise ValueError("invalid artifact selection")
@@ -317,7 +290,6 @@ class Store:
             for positions in groups.values():
                 if any(type(p) is not int for p in positions) or sorted(positions) != list(range(len(positions))):
                     raise ValueError(f"invalid or duplicate positions in {table}")
-        self._run_keys = run_keys
 
     @contextmanager
     def writer(self) -> Iterator[Store]:
@@ -360,9 +332,8 @@ class Store:
         atomic_write(self.path, json.dumps(self.data, indent=2, allow_nan=False) + "\n")
 
     def runs(self, cache_key: str) -> list[dict]:
-        """Return all attempts for an identity, including legacy deadline keys."""
-        return [row for row in self.data["eval_runs"]
-                if row["cache_key"] == cache_key or self._run_keys.get(row["run_id"]) == cache_key]
+        """Return all attempts for a measurement identity."""
+        return [row for row in self.data["eval_runs"] if row["cache_key"] == cache_key]
 
     def cached(self, cache_key: str, *, timeout: float | None = None) -> list[dict]:
         """Return applicable cached observations in persistent attempt order.
@@ -376,8 +347,6 @@ class Store:
         """
         eligible = []
         for row in self.runs(cache_key):
-            if not row["cacheable"]:
-                continue
             if row["status"] == "success":
                 if timeout is None or (row["timeout"] is not None and row["timeout"] <= timeout) or row["seconds"] <= timeout:
                     eligible.append(row)
