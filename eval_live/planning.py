@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import inspect
@@ -12,17 +12,16 @@ from pathlib import Path
 import platform
 import sys
 import time
-from types import MappingProxyType
 from typing import Mapping, Sequence
 import uuid
 
 from .eval_live import Registry, _Output
-from .benchmarks import Benchmark, ProcessError, RunContext, callable_identity, file_digest
+from .benchmarks import Benchmark, ProcessError, RunContext
 from .cli import CONTROL_ARGUMENTS
-from .render import render_artifacts
-from .store import Store, digest, parameter_rows, parameters, validate_tables
+from .render import browser_callbacks, discard_outputs, render_artifacts, report_data
+from .store import Store, digest, parameter_rows, parameters, readonly_parameters, run_identity
 from .targets import Target, script_revision
-from ._workers import Outcome, Worker, completed, measure
+from ._workers import Outcome, Worker, completed, ignore_interrupts, measure
 
 
 def now() -> str:
@@ -39,18 +38,81 @@ class PlannedRun:
     config: dict
     arguments: dict
     environment: dict
-    inputs: list[dict]
     config_id: str
     environment_id: str
-    runner_id: str
     selected: dict | None = None
     needed_by: list[str] = field(default_factory=list)
     fallback: dict = field(default_factory=dict)
 
-    @property
-    def missing(self) -> int:
-        """Number of additional observations eligible for collection."""
-        return int(self.selected is None)
+
+def _replace_rows(store: Store, row: dict, tables: dict) -> None:
+    for name in set(tables) | {name for name in store.data if not name.startswith("eval_")}:
+        store.data[name] = [item for item in store.data.get(name, []) if item["run_id"] != row["run_id"]]
+        store.data[name].extend(dict(item, run_id=row["run_id"]) for item in tables.get(name, []))
+
+
+@dataclass
+class _Attempt:
+    """Own one collector's preparation, diagnostics, and temporary checkout.
+
+    The parent prepares and finishes attempts in both execution modes. Its outer
+    ExitStack also owns ``checkout`` so failures before finish still release it.
+    A worker must stop before its attempt is finished or its checkout is closed.
+    """
+
+    planned: PlannedRun
+    row: dict
+    started: float = field(default_factory=time.perf_counter)
+    contexts: list[RunContext] = field(default_factory=list)
+    checkout: ExitStack = field(default_factory=ExitStack)
+
+    def prepare(self, stack: ExitStack, directories: dict, binaries: dict, *, parallel: bool) -> tuple:
+        """Prepare a checkout/build and return the arguments for a collector context."""
+        planned = self.planned
+        benchmark, target = planned.benchmark, planned.target
+        target_key = (target.identity, target.commit)
+        if (not parallel or benchmark.build) and target_key not in directories:
+            directories[target_key] = stack.enter_context(target.checkout())
+        binary = None
+        if benchmark.build:
+            build_key = digest([*target_key, benchmark.name, benchmark.version,
+                                parameters(benchmark.build_config), planned.environment_id])
+            if build_key not in binaries:
+                build_directory = directories[target_key]
+                context = RunContext(build_directory, parameters(benchmark.build_config),
+                                     target.commit, benchmark.timeout, benchmark.environment)
+                self.contexts.append(context)
+                binary = Path(benchmark.build(context))
+                binary = binary if binary.is_absolute() else build_directory / binary
+                if not binary.is_file():
+                    raise ValueError("build callback did not produce a file")
+                binaries[build_key] = binary
+            binary = binaries[build_key]
+        directory = self.checkout.enter_context(target.checkout()) if parallel else directories[target_key]
+        return (directory, planned.config, target.commit, benchmark.timeout, dict(benchmark.environment), binary)
+
+    def finish(self, store: Store, outcome: Outcome) -> None:
+        """Checkpoint a completed outcome and release this attempt's checkout."""
+        planned, row = self.planned, self.row
+        try:
+            if outcome.status == "success" and any(not outcome.tables.get(name) for name in planned.fallback["pending"]):
+                outcome = Outcome(processes=outcome.processes, status="failure",
+                                  error="collector must return rows in every table declared by error_rows")
+            row.update(status=outcome.status, error=outcome.error,
+                       finished_at=now(), seconds=time.perf_counter() - self.started)
+            tables = outcome.tables if outcome.status == "success" else planned.fallback[outcome.status]
+            _replace_rows(store, row, tables)
+            processes = [process for context in self.contexts for process in context.processes] + outcome.processes
+            for process in processes:
+                process_id = str(uuid.uuid4())
+                store.data["eval_processes"].append(dict(process_id=process_id, run_id=row["run_id"],
+                    cwd=process.cwd, seconds=process.seconds, returncode=process.returncode,
+                    stdout=process.stdout, stderr=process.stderr, status=process.status))
+                store.data["eval_commands"].extend(dict(process_id=process_id, run_id=row["run_id"],
+                    position=i, value=value) for i, value in enumerate(process.argv))
+            store.save()
+        finally:
+            self.checkout.close()
 
 
 @dataclass
@@ -63,7 +125,7 @@ class Plan:
 
     @property
     def missing(self) -> int:
-        return sum(run.missing for run in self.runs.values())
+        return sum(run.selected is None for run in self.runs.values())
 
     @property
     def reused(self) -> int:
@@ -75,7 +137,7 @@ class Plan:
         for run in self.runs.values():
             deadline = "none" if run.benchmark.timeout is None else f"{run.benchmark.timeout:g}s"
             lines.append(f"  {run.benchmark.name}@{run.target.commit[:12]} {run.config!r}: "
-                         f"{int(run.selected is not None)} cached, {run.missing} missing; timeout {deadline}; "
+                         f"{'cached' if run.selected is not None else 'missing'}; timeout {deadline}; "
                          f"needed by {', '.join(run.needed_by)}")
         return "\n".join(lines)
 
@@ -113,7 +175,7 @@ class _Runner:
     def _options(args: Namespace | Mapping | None) -> dict:
         supplied = vars(args) if isinstance(args, Namespace) else dict(args or {})
         options = dict(output="out", data=None, only=None, benchmarks=None, force=False,
-                       dry_run=False, render_only=False, invocation=None, allow_dirty=False, timeout=None,
+                       dry_run=False, render_only=False, invocation=None, timeout=None,
                        commit="HEAD", jobs=os.cpu_count() or 1)
         options.update(parameters(supplied))
         if type(options["jobs"]) is not int or options["jobs"] < 1:
@@ -163,9 +225,7 @@ class _Runner:
                 treatment = {"benchmark": name, "repository": spec["repository"], **config}
                 if not isinstance(treatment["repository"], str) or not treatment["repository"]:
                     raise ValueError("treatment repository must be a nonempty string")
-                catalog[digest(treatment)] = MappingProxyType({
-                    key: tuple(value) if isinstance(value, list) else value for key, value in treatment.items()
-                })
+                catalog[digest(treatment)] = readonly_parameters(treatment)
         return catalog
 
     @staticmethod
@@ -212,10 +272,8 @@ class _Runner:
                         benchmark = replace(benchmark, timeout=options["timeout"])
                     target_key = (treatment["repository"], treatment["commit"])
                     if target_key not in targets:
-                        targets[target_key] = Target.resolve(*target_key,
-                                                             allow_dirty=options["allow_dirty"])
+                        targets[target_key] = Target.resolve(*target_key)
                     target = targets[target_key]
-                    inputs = target.input_hashes(benchmark.inputs)
                     environment = {"python": platform.python_version(), "implementation": platform.python_implementation(),
                                    "platform": platform.platform(), "machine": platform.node(),
                                    "executable": sys.executable,
@@ -225,16 +283,13 @@ class _Runner:
                                          if key not in ("benchmark", "repository", "commit")})
                     config_id = digest({"request": config, "arguments": measurement_args,
                                         "build": parameters(benchmark.build_config)})
-                    runner_id = benchmark.identity()
                     environment_id = digest(environment)
-                    key = digest({"repository": target.identity, "commit": target.commit,
-                                  "dirty": target.dirty, "benchmark": benchmark.name,
-                                  "runner": runner_id, "config": config_id, "inputs": inputs,
-                                  "environment": environment_id})
+                    key = digest(run_identity(repository=target.identity, commit=target.commit,
+                                              benchmark=benchmark.name, data_version=benchmark.version,
+                                              config_id=config_id, environment_id=environment_id))
                     if key not in plan.runs:
                         plan.runs[key] = PlannedRun(key, benchmark, target, config, measurement_args,
-                                                   environment, inputs, config_id, environment_id,
-                                                   runner_id)
+                                                   environment, config_id, environment_id)
                         fallback = {status: benchmark.fallback(config, status)
                                     for status in ("pending", "timed-out", "failure", "interrupted")}
                         if any(set(tables) != set(fallback["pending"]) for tables in fallback.values()):
@@ -244,16 +299,17 @@ class _Runner:
                     reason = f"{artifact.id}/{name}"
                     if reason not in run.needed_by:
                         run.needed_by.append(reason)
-                    if not target.dirty and not options["force"]:
+                    if not options["force"]:
                         cached = store.cached(key, timeout=benchmark.timeout)
-                        latest = cached[-1] if cached else None
-                        run.selected = latest if latest and (latest["status"] == "success" or latest.get("has_rows")) else None
+                        run.selected = cached[-1] if cached else None
                     if key not in requirements:
                         requirements.append(key)
                 plan.requirements[artifact.id][name] = requirements
         return plan
 
-    def _invocation(self, store: Store, options: dict, argv: Sequence[str]) -> dict:
+    @contextmanager
+    def _invocation(self, store: Store, options: dict, argv: Sequence[str]):
+        """Record an invocation and checkpoint its final status, including Ctrl+C."""
         for row in store.data["eval_invocations"]:
             if row["status"] == "running":
                 row.update(status="interrupted", finished_at=now())
@@ -265,96 +321,67 @@ class _Runner:
             filename = inspect.getsourcefile(self.artifacts[0].render)
             script = Path(filename).resolve() if filename else None
         invocation = dict(invocation_id=str(uuid.uuid4()), started_at=now(), finished_at=None,
-                          status="running", cwd=str(Path.cwd()), python=platform.python_version(),
+                          status="running", collection_complete=False, cwd=str(Path.cwd()), python=platform.python_version(),
                           platform=platform.platform(), **script_revision(script))
         store.data["eval_invocations"].append(invocation)
         store.data["eval_arguments"].extend(parameter_rows(options, invocation_id=invocation["invocation_id"]))
         store.data["eval_argv"].extend(dict(invocation_id=invocation["invocation_id"], position=index, token=token)
                                        for index, token in enumerate(argv))
         store.save()
-        return invocation
-
-    @staticmethod
-    def _register_run_metadata(store: Store, planned: PlannedRun) -> None:
-        if not any(row["config_id"] == planned.config_id for row in store.data["eval_configs"]):
-            for scope, values in (("request", planned.config), ("arguments", planned.arguments),
-                                  ("build", planned.benchmark.build_config)):
-                store.data["eval_configs"].extend(parameter_rows(values, config_id=planned.config_id, scope=scope))
-        if not any(row["environment_id"] == planned.environment_id for row in store.data["eval_environments"]):
-            store.data["eval_environments"].extend(parameter_rows(planned.environment, environment_id=planned.environment_id))
-
-    @staticmethod
-    def _replace_rows(store: Store, row: dict, tables: dict) -> None:
-        for name in set(tables) | {name for name in store.data if not name.startswith("eval_")}:
-            store.data[name] = [item for item in store.data.get(name, []) if item["run_id"] != row["run_id"]]
-            store.data[name].extend(dict(item, run_id=row["run_id"]) for item in tables.get(name, []))
+        try:
+            yield invocation
+            invocation["status"] = "success"
+        except KeyboardInterrupt:
+            invocation["status"] = "interrupted"
+            raise
+        except BaseException:
+            invocation["status"] = "failure"
+            raise
+        finally:
+            with ignore_interrupts():
+                invocation["finished_at"] = now()
+                store.save()
 
     def _reserve(self, store: Store, plan: Plan, invocation: dict) -> dict:
         """Save every requested treatment's rows before executing any collector."""
         attempts = {}
+        configs = {row["config_id"] for row in store.data["eval_configs"]}
+        environments = {row["environment_id"] for row in store.data["eval_environments"]}
         for planned in plan.runs.values():
             if planned.selected is not None:
                 continue
-            self._register_run_metadata(store, planned)
+            if planned.config_id not in configs:
+                for scope, values in (("request", planned.config), ("arguments", planned.arguments),
+                                      ("build", planned.benchmark.build_config)):
+                    store.data["eval_configs"].extend(parameter_rows(values, config_id=planned.config_id, scope=scope))
+                configs.add(planned.config_id)
+            if planned.environment_id not in environments:
+                store.data["eval_environments"].extend(parameter_rows(planned.environment, environment_id=planned.environment_id))
+                environments.add(planned.environment_id)
             benchmark, target = planned.benchmark, planned.target
             row = dict(run_id=str(uuid.uuid4()), invocation_id=invocation["invocation_id"],
-                       cache_key=planned.key, cacheable=not target.dirty, benchmark=benchmark.name,
+                       cache_key=planned.key, benchmark=benchmark.name,
                        repository=target.identity, requested_ref=target.ref, commit=target.commit,
-                       dirty=target.dirty, runner_id=planned.runner_id, data_version=benchmark.version,
+                       data_version=benchmark.version,
                        config_id=planned.config_id, environment_id=planned.environment_id,
                        timeout=benchmark.timeout, started_at=None, finished_at=None,
-                       status="pending", seconds=None, binary_sha256=None, error=None, has_rows=True)
+                       status="pending", seconds=None, error=None)
             store.data["eval_runs"].append(row)
-            store.data["eval_inputs"].extend(dict(item, run_id=row["run_id"]) for item in planned.inputs)
-            self._replace_rows(store, row, planned.fallback["pending"])
+            _replace_rows(store, row, planned.fallback["pending"])
             planned.selected = row
             attempts[planned.key] = row
         return attempts
 
     def _collect(self, store: Store, plan: Plan, attempts: dict, *, jobs: int) -> int:
-        collected = 0
         pending = {}
         with ExitStack() as stack:
             directories = {}
             binaries = {}
 
-            def finish(attempt, outcome):
-                nonlocal collected
-                planned, row, started, directory, contexts, checkout = attempt
-                try:
-                    if outcome.status == "success":
-                        try:
-                            validate_tables(outcome.tables, user=True)
-                            if any(not outcome.tables.get(name) for name in planned.fallback["pending"]):
-                                raise ValueError("collector must return rows in every table declared by error_rows")
-                            if planned.target.materialized_input_hashes(directory, planned.benchmark.inputs) != planned.inputs:
-                                raise ValueError("declared inputs changed during collection")
-                        except Exception as error:
-                            outcome = Outcome(processes=outcome.processes, status="failure", error=str(error))
-                    row.update(status=outcome.status, error=outcome.error,
-                               finished_at=now(), seconds=time.perf_counter() - started)
-                    if outcome.status == "success":
-                        tables = outcome.tables
-                    else:
-                        tables = planned.fallback[outcome.status]
-                    self._replace_rows(store, row, tables)
-                    collected += 1
-                    processes = [process for context in contexts for process in context.processes] + outcome.processes
-                    for process in processes:
-                        process_id = str(uuid.uuid4())
-                        store.data["eval_processes"].append(dict(process_id=process_id, run_id=row["run_id"],
-                            cwd=process.cwd, seconds=process.seconds, returncode=process.returncode,
-                            stdout=process.stdout, stderr=process.stderr, status=process.status))
-                        store.data["eval_commands"].extend(dict(process_id=process_id, run_id=row["run_id"],
-                            position=i, value=value) for i, value in enumerate(process.argv))
-                    store.save()
-                finally:
-                    checkout.close()
-
             def receive():
                 worker = completed(pending)
                 outcome = worker.result()
-                finish(pending.pop(worker), outcome)
+                pending.pop(worker).finish(store, outcome)
                 if outcome.status == "interrupted":
                     raise KeyboardInterrupt
 
@@ -366,112 +393,94 @@ class _Runner:
                     # Unmarked treatments are barriers: they run with no other collectors active.
                     while pending and (not parallel or len(pending) >= jobs):
                         receive()
-                    benchmark, target = planned.benchmark, planned.target
+                    benchmark = planned.benchmark
                     row = attempts[planned.key]
                     row.update(status="running", started_at=now())
                     store.save()
-                    contexts = []
-                    checkout = ExitStack()
-                    started = time.perf_counter()
-                    directory = None
+                    attempt = _Attempt(planned, row)
+                    stack.enter_context(attempt.checkout)
                     try:
-                        target_key = (target.identity, target.commit, target.working)
-                        if target.input_hashes(benchmark.inputs) != planned.inputs:
-                            raise ValueError("declared inputs changed after planning")
-                        if (not parallel or benchmark.build) and target_key not in directories:
-                            directories[target_key] = stack.enter_context(target.checkout())
-                        binary = None
-                        if benchmark.build:
-                            build_key = digest([*target_key, callable_identity(benchmark.build),
-                                                parameters(benchmark.build_config), planned.environment_id,
-                                                planned.runner_id, planned.inputs])
-                            if build_key not in binaries:
-                                build_directory = directories[target_key]
-                                context = RunContext(build_directory, parameters(benchmark.build_config),
-                                                     target.commit, benchmark.timeout, benchmark.environment)
-                                contexts.append(context)
-                                binary = Path(benchmark.build(context))
-                                binary = binary if binary.is_absolute() else build_directory / binary
-                                if not binary.is_file():
-                                    raise ValueError("build callback did not produce a file")
-                                if target.materialized_input_hashes(build_directory, benchmark.inputs) != planned.inputs:
-                                    raise ValueError("declared inputs changed during the build")
-                                binaries[build_key] = binary
-                            binary = binaries[build_key]
-                            row["binary_sha256"] = file_digest(binary)
-                        directory = checkout.enter_context(target.checkout()) if parallel else directories[target_key]
-                        if target.materialized_input_hashes(directory, benchmark.inputs) != planned.inputs:
-                            raise ValueError("declared inputs changed while preparing the target")
-                        arguments = (directory, planned.config, target.commit,
-                                     benchmark.timeout, dict(benchmark.environment), binary)
+                        arguments = attempt.prepare(stack, directories, binaries, parallel=parallel)
                         if parallel:
-                            worker = Worker(benchmark.run, arguments)
-                            pending[worker] = (planned, row, started, directory, contexts, checkout)
+                            pending[Worker(benchmark.run, arguments)] = attempt
                             continue
                         outcome = measure(benchmark.run, arguments)
                     except KeyboardInterrupt:
-                        finish((planned, row, started, directory, contexts, checkout),
-                               Outcome(status="interrupted", error="interrupted by user"))
+                        with ignore_interrupts():
+                            attempt.finish(store, Outcome(status="interrupted", error="interrupted by user"))
                         raise
                     except Exception as error:
                         outcome = Outcome(status=error.result.status if isinstance(error, ProcessError) else "failure",
                                           error=str(error))
-                    finish((planned, row, started, directory, contexts, checkout), outcome)
+                    attempt.finish(store, outcome)
                     if outcome.status == "interrupted":
                         raise KeyboardInterrupt
                 while pending:
                     receive()
             finally:
-                # Cancel workers before removing worktrees, retaining command diagnostics.
-                for worker in pending:
-                    worker.cancel()
-                while pending:
-                    worker = completed(pending)
-                    outcome = worker.result()
-                    if outcome.status == "failure":
-                        outcome.status = "interrupted"
-                    finish(pending.pop(worker), outcome)
-                for planned in plan.runs.values():
-                    if planned.key in attempts and attempts[planned.key]["status"] == "pending":
-                        row = attempts[planned.key]
-                        row.update(status="interrupted", finished_at=now(), error="evaluation stopped before collection")
-                        self._replace_rows(store, row, planned.fallback["interrupted"])
-                store.save()
-        return collected
+                with ignore_interrupts():
+                    # Stop every worker before persistence or checkout cleanup can fail.
+                    for worker in pending:
+                        worker.cancel()
+                    outcomes = [(attempt, worker.result()) for worker, attempt in pending.items()]
+                    pending.clear()
+                    try:
+                        for attempt, outcome in outcomes:
+                            if outcome.status == "failure":
+                                outcome.status = "interrupted"
+                            attempt.finish(store, outcome)
+                        for planned in plan.runs.values():
+                            if planned.key in attempts and attempts[planned.key]["status"] == "pending":
+                                row = attempts[planned.key]
+                                row.update(status="interrupted", finished_at=now(), error="evaluation stopped before collection")
+                                _replace_rows(store, row, planned.fallback["interrupted"])
+                        store.save()
+                    finally:
+                        stack.close()
+        return len(attempts)
 
     @staticmethod
-    def _selections(store: Store, plan: Plan, invocation_id: str) -> tuple[list[_Output], dict]:
-        ready = []
-        selections = {}
-        for artifact in plan.artifacts:
-            requirements = plan.requirements[artifact.id]
-            if any(plan.runs[key].selected is None
-                   for keys in requirements.values() for key in keys):
-                continue
-            ready.append(artifact)
-            selections[artifact.id] = {}
-            for name, keys in requirements.items():
-                ids = list(dict.fromkeys(plan.runs[key].selected["run_id"] for key in keys))
-                selections[artifact.id][name] = ids
+    def _selections(plan: Plan) -> dict:
+        return {artifact.id: {
+            name: list(dict.fromkeys(plan.runs[key].selected["run_id"] for key in keys))
+            for name, keys in plan.requirements[artifact.id].items()
+        } for artifact in plan.artifacts}
+
+    @staticmethod
+    def _record_selections(store: Store, invocation_id: str, selections: dict) -> None:
+        for artifact_id, scopes in selections.items():
+            for name, ids in scopes.items():
                 store.data["eval_requirements"].append(dict(invocation_id=invocation_id,
-                    artifact_id=artifact.id, requirement=name))
+                    artifact_id=artifact_id, requirement=name))
                 store.data["eval_selections"].extend(dict(invocation_id=invocation_id,
-                    artifact_id=artifact.id, requirement=name, position=i, run_id=run_id)
+                    artifact_id=artifact_id, requirement=name, position=i, run_id=run_id)
                     for i, run_id in enumerate(ids))
-        return ready, selections
+        store.save()
+
+    def _render(self, store, invocation, artifacts, selections, options):
+        invocation.update(status="success", finished_at=now(), collection_complete=True)
+        data = report_data(store.data, selections, invocation["invocation_id"])
+        return render_artifacts(data, artifacts, selections, Path(options["output"]).expanduser(),
+                                source=self.browser_source, title=self.title)
 
     def _render_only(self, store: Store, options: dict, argv: Sequence[str]) -> EvaluationResult:
+        """Replay saved selections with matching requirements and data versions.
+
+        Reject incompatible declarations before changing files or recording a new
+        invocation. Selectors, Git resolution, and measurement callbacks do not run.
+        """
         artifacts = self._artifacts(options)
         saved = options["invocation"]
         if saved is None:
             candidates = [row for row in store.data["eval_invocations"]
-                          if row.get("collection_complete", row["status"] == "success")]
+                          if row["collection_complete"]]
             if not candidates:
                 raise ValueError("no completed invocation to render")
             saved = candidates[-1]["invocation_id"]
         elif not any(row["invocation_id"] == saved for row in store.data["eval_invocations"]):
             raise ValueError(f"unknown saved invocation: {saved}")
         selections = {}
+        runs = {row["run_id"]: row for row in store.data["eval_runs"]}
         for artifact in artifacts:
             rows = [row for row in store.data["eval_selections"]
                     if row["invocation_id"] == saved and row["artifact_id"] == artifact.id]
@@ -481,30 +490,21 @@ class _Runner:
                 raise ValueError(f"saved invocation is missing requirements for {artifact.id}")
             selections[artifact.id] = {name: [row["run_id"] for row in sorted(rows, key=lambda r: r["position"])
                                             if row["requirement"] == name] for name in artifact.requires}
-        invocation = self._invocation(store, options, argv)
-        invocation["source_invocation"] = saved
-        invocation["collection_complete"] = True
-        for artifact_id, scopes in selections.items():
-            for name, ids in scopes.items():
-                store.data["eval_requirements"].append(dict(invocation_id=invocation["invocation_id"],
-                    artifact_id=artifact_id, requirement=name))
-                store.data["eval_selections"].extend(dict(invocation_id=invocation["invocation_id"],
-                    artifact_id=artifact_id, requirement=name, position=i, run_id=run_id)
-                    for i, run_id in enumerate(ids))
-        store.save()
-        try:
-            invocation.update(status="success", finished_at=now())
-            written = render_artifacts(store.data, artifacts, selections, Path(options["output"]).expanduser(),
-                                       source=self.browser_source, title=self.title)
-        except BaseException:
-            invocation["status"] = "failure"
-            raise
-        finally:
-            if invocation["finished_at"] is None:
-                invocation["finished_at"] = now()
-            store.save()
-        return EvaluationResult(invocation["invocation_id"], store.path, 0,
-                                len({run_id for scopes in selections.values() for ids in scopes.values() for run_id in ids}), written)
+            for row in rows:
+                run = runs[row["run_id"]]
+                benchmark = self.benchmarks.get(run["benchmark"])
+                if benchmark is None or benchmark.version != run["data_version"]:
+                    raise ValueError(
+                        f"saved data version for {run['benchmark']!r} is {run['data_version']!r}; "
+                        "declare the matching version to replay it, or run without --render-only to collect current data"
+                    )
+        discard_outputs(Path(options["output"]).expanduser(), self.artifacts)
+        with self._invocation(store, options, argv) as invocation:
+            invocation["source_invocation"] = saved
+            self._record_selections(store, invocation["invocation_id"], selections)
+            written = self._render(store, invocation, artifacts, selections, options)
+            return EvaluationResult(invocation["invocation_id"], store.path, 0,
+                                    len({run_id for scopes in selections.values() for ids in scopes.values() for run_id in ids}), written)
 
     def run(self, *, args: Namespace | Mapping | None = None, argv: Sequence[str] | None = None) -> EvaluationResult:
         """Plan, collect, checkpoint, and render the selected paper outputs.
@@ -516,6 +516,8 @@ class _Runner:
         use explicit error rows; renderers decide whether to report messages.
         """
         options = self._options(args)
+        # Validate only selected outputs, before collection or changing saved files.
+        browser_callbacks(self._artifacts(options), self.browser_source)
         tokens = list(sys.argv[1:] if argv is None else argv)
         store = Store(self._data_path(options))
         if options["dry_run"]:
@@ -527,25 +529,12 @@ class _Runner:
                 return self._render_only(store, options, tokens)
             plan = self._plan(options, store)
             print(plan.describe())
+            discard_outputs(Path(options["output"]).expanduser(), self.artifacts)
             reused = plan.reused
-            invocation = self._invocation(store, options, tokens)
-            try:
+            with self._invocation(store, options, tokens) as invocation:
                 attempts = self._reserve(store, plan, invocation)
-                ready, selections = self._selections(store, plan, invocation["invocation_id"])
-                store.save()
+                selections = self._selections(plan)
+                self._record_selections(store, invocation["invocation_id"], selections)
                 collected = self._collect(store, plan, attempts, jobs=options["jobs"])
-                invocation.update(status="success", finished_at=now(), collection_complete=True)
-                written = render_artifacts(store.data, ready, selections, Path(options["output"]).expanduser(),
-                                           source=self.browser_source, title=self.title)
-                result = EvaluationResult(invocation["invocation_id"], store.path, collected, reused, written, plan)
-                return result
-            except KeyboardInterrupt:
-                invocation["status"] = "interrupted"
-                raise
-            except BaseException:
-                invocation["status"] = "failure"
-                raise
-            finally:
-                if invocation["finished_at"] is None:
-                    invocation["finished_at"] = now()
-                store.save()
+                written = self._render(store, invocation, plan.artifacts, selections, options)
+                return EvaluationResult(invocation["invocation_id"], store.path, collected, reused, written, plan)

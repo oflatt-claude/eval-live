@@ -136,7 +136,7 @@ def main(argv=None):
         for algorithm in ("list", "set")
         for sample in range(args.samples)
     ]
-    reg.benchmark("membership", membership, version="4", error_rows=error_rows, inputs=["membership.py", "container.py"],
+    reg.benchmark("membership", membership, version="4", error_rows=error_rows,
                   treatments=treatments, repository=args.repository)
 
     def comparison_treatments(treatments):

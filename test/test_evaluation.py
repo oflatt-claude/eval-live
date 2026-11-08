@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import eval_live
 from eval_live.benchmarks import ProcessInterrupted, ProcessResult
-from eval_live.store import atomic_write, digest, parameter_rows, read_parameters
+from eval_live.store import atomic_write, parameter_rows, read_parameters
 
 CALLS = []
 BUILDS = []
@@ -36,6 +36,11 @@ def collect(context):
     value = int((context.directory / "value.txt").read_text())
     return {"measurements": [{"value": value, "factor": context.config.get("factor", 1),
                                "sample": context.config.get("sample", 0)}]}
+
+
+def logged_collect(context):
+    context.command([sys.executable, "-c", "print('measurement log')"])
+    return collect(context)
 
 
 def slow(context):
@@ -68,6 +73,19 @@ def concurrent_collect(context):
                                "started": started, "finished": time.monotonic()}]}
 
 
+def stubborn_collect(context):
+    import signal
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    (Path(context.config["pids"]) / context.config["case"]).write_text(str(os.getpid()))
+    while True:
+        time.sleep(0.05)
+
+
+def collect_directory(context):
+    context.command([sys.executable, "-c", "import src.worker; print(src.worker.VALUE)"])
+    return collect(context)
+
+
 def interrupted_collect(context):
     context.command([sys.executable, "-c",
                      "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
@@ -90,11 +108,6 @@ def use_binary(context):
 
 def invalid(context):
     return {"measurements": [{"nested": [1, 2]}]}
-
-
-def mutate_input(context):
-    (context.directory / "value.txt").write_text("changed")
-    return {"measurements": [{"value": 99}]}
 
 
 def table(data):
@@ -158,6 +171,33 @@ def broken_figure(data):
     raise ValueError("invalid figure input")
 
 
+RENDER_CALLS = []
+
+
+def counted_table(data):
+    RENDER_CALLS.append("table")
+    return [{"calls": len(RENDER_CALLS)}]
+
+
+def transient_failure(data):
+    RENDER_CALLS.append("failure")
+    if len(RENDER_CALLS) == 1:
+        raise ValueError("first calculation failed")
+    return [{"calls": len(RENDER_CALLS)}]
+
+
+def omitted_figure(data):
+    return None
+
+
+def interrupted_figure(data):
+    raise KeyboardInterrupt
+
+
+def large_measurement(context):
+    return {"measurements": [{"value": 2**53 + 1}]}
+
+
 class EvaluationTests(unittest.TestCase):
     def setUp(self):
         CALLS.clear()
@@ -199,7 +239,7 @@ class EvaluationTests(unittest.TestCase):
         if registry is None:
             registry = eval_live.Registry(**kwargs)
             registry.table("values", table, requires=request or self.request(), id='values')
-        options = vars(benchmark or eval_live.Benchmark("read", collect, "1", inputs=["value.txt"], error_rows=error_rows)).copy()
+        options = vars(benchmark or eval_live.Benchmark("read", collect, "1", error_rows=error_rows)).copy()
         options["fn"] = options.pop("run")
         registry.benchmark(**options, treatments=self.treatments, repository=self.repo)
         return registry
@@ -218,7 +258,7 @@ class EvaluationTests(unittest.TestCase):
     def parallel_registry(self, treatments, callback=concurrent_collect, **options):
         reg = eval_live.Registry()
         reg.benchmark("read", callback, version="1", repository=self.repo,
-                      inputs=["value.txt"], treatments=treatments, error_rows=error_rows, **options)
+                      treatments=treatments, error_rows=error_rows, **options)
         reg.table("Values", table, id='values')
         return reg
 
@@ -290,6 +330,13 @@ class EvaluationTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "POSIX signal and process-group behavior")
     def test_parallel_interrupt_stops_commands_and_checkpoints_attempts(self):
+        self.check_parallel_interrupt("interrupted_collect")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal behavior")
+    def test_repeated_interrupt_kills_stubborn_workers_and_removes_worktrees(self):
+        self.check_parallel_interrupt("stubborn_collect", repeated=True)
+
+    def check_parallel_interrupt(self, collector, repeated=False):
         import signal
         before = self.git("worktree", "list", "--porcelain")
         pids = self.root / "pids"
@@ -298,10 +345,10 @@ class EvaluationTests(unittest.TestCase):
         script.write_text(
             "import sys\n"
             f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
-            "import eval_live\nfrom test_evaluation import interrupted_collect, constant_table, error_rows\n"
+            f"import eval_live\nfrom test_evaluation import {collector}, constant_table, error_rows\n"
             "if __name__ == '__main__':\n"
             "    reg = eval_live.Registry()\n"
-            f"    reg.benchmark('slow', interrupted_collect, version='1', error_rows=error_rows, repository={str(self.repo)!r}, "
+            f"    reg.benchmark('slow', {collector}, version='1', error_rows=error_rows, repository={str(self.repo)!r}, "
             f"treatments=[{{'case': str(i), 'parallel': True, 'pids': {str(pids)!r}}} for i in range(4)])\n"
             "    reg.table('Counts', constant_table)\n"
             f"    reg.run(args={{'output': {str(self.output)!r}, 'jobs': 2}})\n"
@@ -313,6 +360,9 @@ class EvaluationTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertEqual(len(list(pids.iterdir())), 2, "workers did not start")
                 process.send_signal(signal.SIGINT)
+                if repeated:
+                    time.sleep(0.15)
+                    process.send_signal(signal.SIGINT)
                 _, stderr = process.communicate(timeout=10)
                 self.assertIn("KeyboardInterrupt", stderr)
             finally:
@@ -324,7 +374,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(data["measurements"]), 4)
         self.assertEqual({r["status"] for r in data["measurements"]}, {"interrupted"})
         self.assertFalse((self.output / "index.html").exists())
-        self.assertEqual([r["status"] for r in data["eval_processes"]], ["interrupted", "interrupted"])
+        self.assertEqual([r["status"] for r in data["eval_processes"]], [] if repeated else ["interrupted", "interrupted"])
         self.assertEqual(data["eval_invocations"][0]["status"], "interrupted")
         self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
         self.assertTrue(all(not Path(row["cwd"]).exists() for row in data["eval_processes"]))
@@ -404,8 +454,8 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(output.count("Results need review"), 2)
         self.assertNotIn("Some values are missing", self.data.read_text())
         self.assertNotIn("Results need review", self.data.read_text())
-        self.assertTrue((self.output / "first.tex").exists())
-        self.assertTrue((self.output / "second.tex").exists())
+        self.assertFalse((self.output / "first.tex").exists())
+        self.assertFalse((self.output / "second.tex").exists())
         saved_rows = self.stored()["measurements"]
         with redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
             self.run_eval(evaluation, render=True, render_only=True)
@@ -431,8 +481,109 @@ class EvaluationTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()) as captured, self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
             self.run_eval(self.evaluation(registry=reg), render=True)
         self.assertIn("ERROR: Broken: invalid figure input", captured.getvalue())
-        self.assertTrue((self.output / "working.tex").exists())
+        self.assertFalse((self.output / "working.tex").exists())
         self.assertEqual(len(self.stored()["measurements"]), 1)
+
+    def test_replay_rejects_incompatible_or_missing_benchmark_version(self):
+        reg = self.evaluation()
+        original = self.run_eval(reg, render=True)
+        reg._benchmarks["read"]["benchmark"]["version"] = "seconds"
+        with self.assertRaisesRegex(ValueError, "saved data version"):
+            self.run_eval(reg, render=True, render_only=True)
+        self.assertEqual(self.stored()["eval_invocations"][-1]["invocation_id"], original.invocation_id)
+        del reg._benchmarks["read"]
+        with self.assertRaisesRegex(ValueError, "saved data version"):
+            self.run_eval(reg, render=True, render_only=True)
+
+    def test_table_is_evaluated_once_for_files_and_console_on_every_run(self):
+        RENDER_CALLS.clear()
+        reg = eval_live.Registry()
+        reg.table("Counted", counted_table, id="counted")
+        for expected in (1, 2):
+            self.run_eval(reg, render=True)
+            self.assertEqual(len(RENDER_CALLS), expected)
+            self.assertIn(str(expected), (self.output / "counted.tex").read_text())
+
+    def test_transient_render_error_cannot_be_erased_by_console_output(self):
+        RENDER_CALLS.clear()
+        reg = eval_live.Registry()
+        reg.table("Flaky", transient_failure, id="flaky")
+        with redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
+            self.run_eval(reg, render=True)
+        self.assertEqual(len(RENDER_CALLS), 1)
+        self.assertEqual(self.stored()["eval_invocations"][-1]["status"], "failure")
+        self.assertFalse((self.output / "flaky.tex").exists())
+        self.assertFalse((self.output / "index.html").exists())
+
+    def test_omitted_or_removed_outputs_never_leave_old_files(self):
+        reg = self.evaluation()
+        reg.graph("Plot", figure, id="plot")
+        self.run_eval(reg, render=True)
+        self.assertTrue((self.output / "plot.pdf").exists())
+        (self.output / "notes.txt").write_text("keep")
+        reg = self.evaluation()
+        reg.graph("Plot", omitted_figure, id="plot")
+        self.run_eval(reg, render=True)
+        self.assertFalse((self.output / "plot.pdf").exists())
+        self.run_eval(reg, render=True, only=["plot"])
+        self.assertFalse((self.output / "values.tex").exists())
+        self.assertEqual((self.output / "notes.txt").read_text(), "keep")
+        self.assertTrue(self.data.exists())
+
+    def test_dry_run_preserves_outputs_and_collection_interrupt_removes_them(self):
+        reg = self.evaluation()
+        self.run_eval(reg, render=True)
+        before = {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()}
+        self.run_eval(reg, dry_run=True)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()})
+        with patch("eval_live.planning._Runner._collect", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.run_eval(reg, render=True, force=True)
+        self.assertFalse((self.output / "values.tex").exists())
+        self.assertFalse((self.output / "index.html").exists())
+        self.assertTrue(self.data.exists())
+
+    def test_interrupt_during_render_or_publication_removes_all_artifacts(self):
+        for during_publish in (False, True):
+            reg = self.evaluation()
+            reg.graph("Plot", figure, id="plot")
+            self.run_eval(reg, render=True)
+            if during_publish:
+                replace = Path.replace
+                def interrupt(path, target):
+                    if path.name == "plot.pdf":
+                        raise KeyboardInterrupt
+                    return replace(path, target)
+                with patch.object(Path, "replace", interrupt), self.assertRaises(KeyboardInterrupt):
+                    self.run_eval(reg, render=True)
+            else:
+                reg = self.evaluation()
+                reg.graph("Plot", interrupted_figure, id="plot")
+                with self.assertRaises(KeyboardInterrupt):
+                    self.run_eval(reg, render=True)
+            self.assertEqual(list(self.output.glob("*.pdf")), [])
+            self.assertEqual(list(self.output.glob("*.tex")), [])
+            self.assertFalse((self.output / "index.html").exists())
+            self.assertTrue(self.data.exists())
+
+    def test_browser_rejects_unsafe_integers_without_corrupting_saved_data(self):
+        from eval_live.render import write_html
+        reg = self.evaluation()
+        self.run_eval(reg)
+        for value in (2**53, -(2**53), 2**53 + 1):
+            with self.assertRaisesRegex(ValueError, "browser's exact range"):
+                write_html(self.output / "large.html", {"samples": [{"value": value}]},
+                           reg._outputs, {"values": {"data": []}})
+        self.assertFalse((self.output / "large.html").exists())
+        for value in (2**53 - 1, str(2**53 + 1)):
+            write_html(self.output / "large.html", {"samples": [{"value": value}]},
+                       reg._outputs, {"values": {"data": []}})
+        reg._benchmarks["read"]["benchmark"]["run"] = large_measurement
+        reg._benchmarks["read"]["benchmark"]["version"] = "2"
+        with self.assertRaisesRegex(ValueError, "browser's exact range"):
+            self.run_eval(reg, render=True)
+        self.assertEqual(self.stored()["measurements"][-1]["value"], 2**53 + 1)
+        self.assertFalse((self.output / "values.tex").exists())
+        self.assertFalse((self.output / "index.html").exists())
 
     def test_cache_hits_do_not_collect_or_checkout(self):
         first = self.run_eval()
@@ -593,21 +744,18 @@ class EvaluationTests(unittest.TestCase):
             self.run_eval(only=["missing"])
         self.assertEqual(len(CALLS), 1)
 
-    def test_configuration_inputs_and_unknown_arguments_invalidate(self):
+    def test_configuration_environment_and_unknown_arguments_invalidate(self):
         self.run_eval()
         self.run_eval(self.evaluation(self.request(factor=2)))
         for argument in ("temperature", "baseline"):
             self.run_eval(**{argument: 3})
         self.assertEqual(len(CALLS), 4)
-        external = self.root / "input.txt"
-        external.write_text("first")
-        benchmark = eval_live.Benchmark("read", collect, "1", inputs=[external], error_rows=error_rows)
-        self.run_eval(self.evaluation(benchmark=benchmark))
-        external.write_text("second")
-        self.run_eval(self.evaluation(benchmark=benchmark))
-        self.assertEqual(len(CALLS), 6)
-        result = self.run_eval(self.evaluation(benchmark=benchmark), only=["values"])
-        self.assertEqual(result.collected, 0)
+        for options in ({"tools": {"solver": "2"}}, {"environment": {"MODE": "proofs"}},
+                        {"build_config": {"optimize": True}}):
+            benchmark = eval_live.Benchmark("read", collect, "1", error_rows=error_rows, **options)
+            self.assertEqual(self.run_eval(self.evaluation(benchmark=benchmark)).collected, 1)
+            self.assertEqual(self.run_eval(self.evaluation(benchmark=benchmark), only=["values"]).reused, 1)
+        self.assertEqual(len(CALLS), 7)
 
     def test_plot_changes_and_output_path_do_not_invalidate(self):
         self.run_eval()
@@ -632,15 +780,11 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual((self.repo / "value.txt").read_text(), "999")
         self.assertEqual(before, self.git("worktree", "list", "--porcelain"))
 
-    def test_dirty_worktree_requires_opt_in_and_never_reuses(self):
-        (self.repo / "value.txt").write_text("30")
-        evaluation = self.evaluation(self.request(commit="WORKTREE"))
-        with self.assertRaisesRegex(ValueError, "dirty"):
-            self.run_eval(evaluation)
-        self.run_eval(evaluation, allow_dirty=True)
-        self.run_eval(evaluation, allow_dirty=True)
-        self.assertEqual(len(CALLS), 2)
-        self.assertTrue(all(not row["cacheable"] for row in self.stored()["eval_runs"]))
+    def test_requested_ref_must_resolve_to_a_commit(self):
+        with self.assertRaises(ValueError):
+            self.run_eval(self.evaluation(self.request(commit="WORKTREE")))
+        self.assertFalse(self.data.exists())
+        self.assertEqual(CALLS, [])
 
     def test_dry_run_never_creates_output_or_runs_benchmark(self):
         result = self.run_eval(dry_run=True)
@@ -665,7 +809,7 @@ class EvaluationTests(unittest.TestCase):
         benchmark = eval_live.Benchmark("read", slow, "1", timeout=0.02, error_rows=error_rows)
         self.run_eval(self.evaluation(benchmark=benchmark))
         self.assertEqual(self.stored()["eval_runs"][0]["status"], "timed-out")
-        self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", invalid, "1", error_rows=error_rows)))
+        self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", invalid, "2", error_rows=error_rows)))
         self.assertTrue(all(row["value"] is None for row in self.stored()["measurements"]))
 
     def test_increasing_timeout_reuses_successes_and_retries_only_timeouts(self):
@@ -738,26 +882,18 @@ class EvaluationTests(unittest.TestCase):
         self.run_eval(evaluation, timeout=600, force=True)
         self.assertEqual(len(CALLS), 2)
 
-    def test_legacy_timeout_keys_are_reused_without_rewriting_observations(self):
-        self.run_eval()
+    def test_older_schema_is_rejected_without_overwriting_data_or_report(self):
+        self.run_eval(render=True)
         data = self.stored()
-        row = data["eval_runs"][0]
-        data.pop("eval_requirements")
-        row.pop("data_version")
-        row["sample"] = 0  # Earlier writers recorded their internal attempt index.
-        row["cache_key"] = digest({
-            "repository": row["repository"], "commit": row["commit"], "dirty": row["dirty"],
-            "benchmark": row["benchmark"], "runner": row["runner_id"], "config": row["config_id"],
-            "inputs": [{"path": item["path"], "sha256": item["sha256"]} for item in data["eval_inputs"]],
-            "environment": row["environment_id"], "timeout": row["timeout"],
-        })
-        self.data.write_text(json.dumps(data))
-        result = self.run_eval(timeout=600)
-        self.assertEqual((result.reused, result.collected), (1, 0))
-        self.assertEqual(self.stored()["eval_runs"][0], row)
-        result = self.run_eval(self.evaluation(self.request(samples=2)), timeout=600)
-        self.assertEqual((result.reused, result.collected), (1, 1))
-        self.assertEqual([row["sample"] for row in self.stored()["measurements"]], [0, 1])
+        data["eval_metadata"][0]["schema_version"] = 1
+        original = json.dumps(data)
+        self.data.write_text(original)
+        report = (self.output / "index.html").read_bytes()
+        with self.assertRaisesRegex(ValueError, "unsupported schema version.*new --data path"):
+            self.run_eval(render=True)
+        self.assertEqual(self.data.read_text(), original)
+        self.assertEqual((self.output / "index.html").read_bytes(), report)
+        self.assertEqual(len(CALLS), 1)
 
     def test_timeout_cli_and_programmatic_validation(self):
         parser = eval_live.add_arguments(argparse.ArgumentParser())
@@ -771,14 +907,115 @@ class EvaluationTests(unittest.TestCase):
                 self.run_eval(timeout=deadline)
         self.assertFalse(self.output.exists())
 
-    def test_mutating_materialized_inputs_cannot_produce_a_cache_hit(self):
-        benchmark = eval_live.Benchmark("read", mutate_input, "1", inputs=["value.txt"], error_rows=error_rows)
-        self.run_eval(self.evaluation(benchmark=benchmark))
-        self.assertTrue(all(row["value"] is None for row in self.stored()["measurements"]))
-        self.assertEqual(self.stored()["eval_runs"][0]["status"], "failure")
+    def test_generated_files_do_not_prevent_reuse(self):
+        (self.repo / "src").mkdir()
+        (self.repo / "src/worker.py").write_text("VALUE = 20")
+        self.git("add", "src")
+        self.commit_value(20)
+        benchmark = eval_live.Benchmark("read", collect_directory, "1", error_rows=error_rows)
+        reg = self.evaluation(self.request(samples=3), benchmark=benchmark)
+        reg.macros("Count", macros)
+        self.assertEqual(self.run_eval(reg).collected, 3)
+        self.assertTrue(all(run["status"] == "success" for run in self.stored()["eval_runs"]))
+        self.assertEqual(reg.plan(args={"output": self.output}).reused, 3)
+
+    def test_browser_callback_preflight_checks_only_selected_outputs(self):
+        reg = self.evaluation()
+        reg.table("Invalid", lambda data: [], id="invalid")
+        self.assertEqual(reg.plan(args={"output": self.output}).missing, 1)
+        with self.assertRaisesRegex(ValueError, "named top-level"):
+            self.run_eval(reg)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(CALLS, [])
+        self.run_eval(reg, render=True, only=["values"])
+        before = self.data.read_bytes()
+        with self.assertRaisesRegex(ValueError, "named top-level"):
+            self.run_eval(reg, render_only=True)
+        self.assertEqual(self.data.read_bytes(), before)
+        self.assertTrue((self.output / "index.html").exists())
+
+    def test_browser_callback_preflight_checks_filters_and_source_files(self):
+        reg = self.evaluation()
+        reg.table("Filtered", table, interactive_filter=lambda rows, data: data, id="filtered")
+        with self.assertRaisesRegex(ValueError, "named top-level"):
+            self.run_eval(reg)
+        from eval_live.latex import escape
+        reg = self.evaluation()
+        reg.table("Helper", escape, id="helper")
+        with self.assertRaisesRegex(ValueError, "one source file"):
+            self.run_eval(reg)
+        self.assertEqual(CALLS, [])
+        self.assertFalse(self.output.exists())
+
+    def test_render_only_interrupt_records_interrupted_status(self):
+        from dataclasses import replace
+        reg = self.evaluation()
+        self.run_eval(reg, render=True)
+        reg._outputs[0] = replace(reg._outputs[0], render=interrupted_figure)
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_eval(reg, render=True, render_only=True)
+        self.assertEqual(self.stored()["eval_invocations"][-1]["status"], "interrupted")
+        self.assertTrue(self.stored()["eval_invocations"][-1]["collection_complete"])
+        self.assertFalse((self.output / "index.html").exists())
+        self.assertEqual(len(CALLS), 1)
+
+    def test_html_contains_union_of_referenced_runs_and_reachable_provenance(self):
+        benchmark = eval_live.Benchmark("read", logged_collect, "1", error_rows=error_rows)
+
+        def evaluation(request=None, registry=None):
+            return self.evaluation(request, registry, benchmark=benchmark)
+
+        # Populate older attempts and another configuration in the same database.
+        original = self.run_eval(evaluation(self.request(samples=3)), render=True)
+        self.run_eval(evaluation(self.request(samples=3)), force=True)
+        self.run_eval(evaluation(self.request(factor=9)))
+        reg = eval_live.Registry()
+        reg.table("Comparison", comparison, requires={
+            "baseline": self.request(samples=1, commit=self.old),
+            "candidate": self.request(samples=1)}, id="comparison")
+        reg.table("Values", table, requires=self.request(samples=2), id="values")
+        reg.table("Empty", empty_named_table, requires={"empty": lambda ts: []}, id="empty")
+        reg = evaluation(registry=reg)
+        current = self.run_eval(reg, render=True)
+
+        def check_report(result, expected_count):
+            page = (self.output / "index.html").read_text()
+            embedded, _ = json.JSONDecoder().raw_decode(page.split('<script>initEvalLive("report", ', 1)[1])
+            saved = self.stored()
+            expected = {row["run_id"] for row in saved["eval_selections"]
+                        if row["invocation_id"] == result.invocation_id}
+            self.assertEqual(len(expected), expected_count)
+            self.assertEqual({row["run_id"] for row in embedded["eval_runs"]}, expected)
+            self.assertEqual({row["run_id"] for row in embedded["measurements"]}, expected)
+            self.assertEqual({row["invocation_id"] for row in embedded["eval_selections"]}, {result.invocation_id})
+            self.assertEqual(len(embedded["eval_requirements"]), len([row for row in saved["eval_requirements"]
+                             if row["invocation_id"] == result.invocation_id]))
+            # The projection must still be a complete, valid provenance database.
+            report_path = self.root / "report-data.json"
+            report_path.write_text(json.dumps(embedded))
+            eval_live.Store(report_path)
+            self.assertGreater(len(saved["eval_runs"]), len(embedded["eval_runs"]))
+            self.assertEqual(len(embedded["eval_processes"]), expected_count)
+            for name in ("eval_processes", "eval_commands"):
+                self.assertTrue(embedded[name])
+                self.assertTrue(all(row["run_id"] in expected for row in embedded[name]))
+            return embedded
+
+        page = check_report(current, 3)
+        self.assertEqual({row["commit"] for row in page["eval_runs"]}, {self.head, self.old})
+        self.assertGreater(len({row["invocation_id"] for row in page["eval_runs"]}), 1)
+        replay = self.run_eval(reg, render=True, render_only=True, invocation=current.invocation_id, only=["comparison"])
+        check_report(replay, 2)
+        replay = self.run_eval(reg, render=True, render_only=True, invocation=replay.invocation_id, only=["comparison"])
+        check_report(replay, 2)
+        # An explicit older invocation retains its original attempts, even after --force.
+        replay = self.run_eval(evaluation(self.request(samples=3)), render=True, render_only=True,
+                               invocation=original.invocation_id)
+        page = check_report(replay, 3)
+        self.assertEqual({row["invocation_id"] for row in page["eval_runs"]}, {original.invocation_id})
 
     def test_build_shared_across_configs_and_skipped_for_cache_hits(self):
-        benchmark = eval_live.Benchmark("read", use_binary, "1", build=build, inputs=["value.txt"], error_rows=error_rows)
+        benchmark = eval_live.Benchmark("read", use_binary, "1", build=build, error_rows=error_rows)
         requests = [self.request(value=1, samples=2), self.request(value=2)]
         reg = eval_live.Registry()
         reg.table("values", table, requires=lambda ts: [t for select in requests for t in select(ts)], id='values')
@@ -786,7 +1023,6 @@ class EvaluationTests(unittest.TestCase):
         result = self.run_eval(evaluation)
         self.assertEqual(result.collected, 3)
         self.assertEqual(len(BUILDS), 1)
-        self.assertTrue(all(row["binary_sha256"] for row in self.stored()["eval_runs"]))
         self.assertEqual(self.run_eval(evaluation).collected, 0)
         self.assertEqual(len(BUILDS), 1)
 
@@ -859,13 +1095,16 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(self.stored()["eval_runs"][0]["status"], "interrupted")
         self.assertEqual(CALLS, [])
 
-    def test_protocol_version_and_helper_code_invalidate_cache(self):
+    def test_collector_changes_require_an_explicit_version_bump(self):
         self.run_eval()
-        result = self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", collect, "2", inputs=["value.txt"], error_rows=error_rows)))
-        self.assertEqual(result.collected, 1)
+        # Sequential collectors need no inspectable source or helper declaration.
+        changed = lambda context: {"measurements": [{"value": 42}]}
+        for version, collected in (("1", 0), ("2", 1), ("2", 0)):
+            benchmark = eval_live.Benchmark("read", changed, version, error_rows=error_rows)
+            result = self.run_eval(self.evaluation(benchmark=benchmark))
+            self.assertEqual(result.collected, collected)
         self.assertEqual([row["data_version"] for row in self.stored()["eval_runs"]], ["1", "2"])
-        result = self.run_eval(self.evaluation(benchmark=eval_live.Benchmark("read", collect, "2", inputs=["value.txt"], dependencies=[table], error_rows=error_rows)))
-        self.assertEqual(result.collected, 1)
+        self.assertEqual([row["value"] for row in self.stored()["measurements"]], [20, 42])
 
     def test_exports_share_samples_and_write_only_one_json_data_file(self):
         self.run_eval(self.evaluation(self.request(samples=3)))
@@ -951,21 +1190,21 @@ class RegistryTests(unittest.TestCase):
                     for revision in ("baseline", "candidate")
                     for row in eval_live.select(data, revision)["measurements"]]
 
-        bound = reg._bind({"current": {"data": ["new-10", "new-20"]},
+        reg._selections = {"current": {"data": ["new-10", "new-20"]},
                            "comparison": {"baseline": ["old-10", "old-20"],
-                                          "candidate": ["new-10", "new-20"]}})
-        current_rows = bound.run_tables(data)[0]["rows"]
+                                          "candidate": ["new-10", "new-20"]}}
+        current_rows = reg.run_tables(data)[0]["rows"]
         self.assertEqual([row["run_id"] for row in current_rows], ["new-10", "new-20"])
         # A measured value can select sizes, then propagate them across commits.
         for cutoff, sizes in ((2, [10]), (0, [])):
             with self.subTest(cutoff=cutoff):
-                filtered = bound.apply_table_filters([
+                filtered = reg.apply_table_filters([
                     {"name": "Current", "filtered_rows": [row for row in current_rows
                                                            if row["seconds"] < cutoff]},
                 ], data)
                 self.assertEqual([row["run_id"] for row in filtered["measurements"]],
                                  [f"{revision}-{size}" for revision in ("old", "new") for size in sizes])
-                rendered = bound.run_tables(filtered)
+                rendered = reg.run_tables(filtered)
                 self.assertEqual([row["run_id"] for row in rendered[0]["rows"]],
                                  [f"new-{size}" for size in sizes])
                 self.assertEqual(rendered[1]["rows"],
@@ -1038,11 +1277,11 @@ class StoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             store = eval_live.Store(Path(temporary) / "results.json")
             store.data["eval_runs"] = [
-                dict(run_id="fast", cache_key="key", cacheable=True, status="success", timeout=10, seconds=2),
-                dict(run_id="overhead", cache_key="key", cacheable=True, status="success", timeout=10, seconds=12),
-                dict(run_id="timeout", cache_key="key", cacheable=True, status="timed-out", timeout=10, seconds=10),
-                dict(run_id="error", cache_key="key", cacheable=True, status="failure", timeout=10, seconds=1),
-                dict(run_id="interrupted", cache_key="key", cacheable=True, status="interrupted", timeout=10, seconds=1),
+                dict(run_id="fast", cache_key="key", status="success", timeout=10, seconds=2),
+                dict(run_id="overhead", cache_key="key", status="success", timeout=10, seconds=12),
+                dict(run_id="timeout", cache_key="key", status="timed-out", timeout=10, seconds=10),
+                dict(run_id="error", cache_key="key", status="failure", timeout=10, seconds=1),
+                dict(run_id="interrupted", cache_key="key", status="interrupted", timeout=10, seconds=1),
             ]
             def select(deadline):
                 return [row["run_id"] for row in store.cached("key", timeout=deadline)]

@@ -89,17 +89,22 @@ The flag and worker count participate in cache identity. Concurrent timing
 measurements share machine resources, so use `--jobs 1` for sequential timings.
 
 Timings are illustrative and vary with machine load. Container construction is
-outside the timed region. Generated files are replaced individually; use a
-separate output directory for subsets to avoid confusing them with older
-paper files. The sibling `.lock` file is writer coordination, not stored data.
+outside the timed region. Each invocation replaces the generated report;
+files for unselected outputs are removed. Use separate output directories to
+keep several reports. The HTML includes the runs referenced by its outputs;
+`results.json` retains the complete history. The sibling `.lock` file is writer
+coordination, not stored data.
 
 The [Python guide](../docs/python-guide.rst) covers callback contracts and the
 [API reference](../docs/api.rst) is generated from docstrings. A second example,
-[egglog_eval.py](egglog_eval.py), adapts a real egglog workload when a compatible
-local repository and built binary are available.
+[egglog_eval.py](egglog_eval.py), builds and runs a real egglog workload when a
+compatible local repository and Rust toolchain are available.
 
-In the egglog example, `--binary` selects the executable and `--repository`/
-`--commit` select the `.egg` input files. One treatment list combines files,
-modes, and sample indices; one `measure` function runs each selected treatment.
-`--modes off proof-testing` selects two modes. The binary and input files are
-fingerprinted together, so changing either invalidates the cache.
+In the egglog example, `--repository` and `--commit` select both the engine
+source and `.egg` files. The build callback runs Cargo with the committed
+lockfile and shares its executable across treatments. One treatment list
+combines files, modes, and sample indices; one `measure` function runs each selected treatment.
+`--modes off proof-testing` selects two modes. Commit sources, data, dependency
+locks, and toolchain pins together; bump the registered `version` when changing
+the Python measurement or build functions. The example expects timing-summary
+schema 4 from egglog.

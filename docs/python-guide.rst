@@ -45,7 +45,7 @@ Each selected treatment invokes the registered callback once:
 
    reg = eval_live.Registry()
    reg.benchmark(
-       "worker", collect, version="1", error_rows=error_rows, inputs=["worker.py"],
+       "worker", collect, version="1", error_rows=error_rows,
        treatments=[{"suite": suite, "size": size}
                    for suite in ("a", "b") for size in (100, 1000)],
    )
@@ -66,14 +66,22 @@ stdout, and stderr. Nonzero exits and timeouts raise ``ProcessError``.
 the repository; output selectors can add or change their commit.
 Selectors see those fields and ``benchmark`` alongside the treatment's own
 parameters; these three reserved fields are omitted from ``context.config``.
-Refs resolve to full SHAs before cache lookup. ``WORKTREE`` explicitly selects
-working files; dirty collection requires ``--allow-dirty`` and bypasses reuse.
+Refs resolve to full SHAs before cache lookup. Collection always uses temporary
+worktrees of committed revisions; uncommitted changes in your checkout are
+ignored and left untouched.
 
-Declare helper functions with ``dependencies``, external files/directories
-with ``inputs``, toolchain versions with ``tools``, and execution variables
-with ``environment``. Relative input paths are read at the target commit;
-absolute inputs are hashed from the filesystem. The library cannot infer
-undeclared globals, dependencies, or external services.
+Commit workload source and data, pin dependencies, and read them from
+``context.directory``. Keep tracked files unchanged during builds and collection;
+use scratch files or temporary directories for generated output. The commit
+identifies file contents: eval-live does not inspect dependencies, hash files,
+or detect modifications made by callbacks. External files or services are the
+author's responsibility and must have immutable versions recorded in configuration.
+Record toolchain versions with ``tools`` and execution variables with ``environment``.
+
+Collector and build callbacks execute from the current evaluation script, even
+when a treatment selects an older workload commit. Their source is not hashed.
+Bump ``version`` whenever those callbacks, their helpers, or the measurement
+protocol change; see `Version the collected tables`_.
 
 An optional ``build(context) -> Path`` receives ``build_config`` and prepares
 ``context.binary``. Builds share work across compatible treatments in an
@@ -203,9 +211,9 @@ with ``Registry(selection_arguments=[...])``. The demo excludes the whole
 ``sizes`` list because each individual size is already a treatment field. It
 keeps the total sample count in the configuration key.
 
-The cache also includes repository/full commit, collection and declared helper
-code, declared data version, input hashes, and relevant environment/tool
-settings. Plot code and selectors do not affect measurement identity.
+The cache also includes repository/full commit, benchmark name, declared
+``version``, build configuration, and recorded environment/tool settings.
+Plot code and selectors do not affect measurement identity.
 
 A treatment plus CLI configuration and commit identifies what to collect. A
 table that stores multiple rows for that treatment may additionally distinguish
@@ -218,10 +226,10 @@ Version the collected tables
 
 ``reg.benchmark(..., version="2")`` declares the data format/measurement protocol
 version for the tables that callback returns. It is stored explicitly in
-``eval_runs.data_version`` and included in the runner fingerprint. Bump it when
-tables change shape or meaning, or when an otherwise undeclared protocol change
-requires recollection. Existing observations retain their original version;
-new invocations select data using the current identity. Changes to rendering
+``eval_runs.data_version`` and included in the cache identity. Bump it when
+collector/build/helper code or tables change, including changes to units,
+parsing, error rows, or measurement methodology. Existing observations retain
+their original version; new invocations select data using the current identity. Changes to rendering
 alone reuse data. This version is independent of the JSON container's schema.
 
 Opt in to parallel collection
@@ -244,7 +252,7 @@ before they start, and subsequent workers wait for them to finish.
 Parallel collectors must be importable top-level functions; guard script
 execution with ``if __name__ == '__main__'``. Each committed parallel treatment
 gets its own temporary worktree. Build outputs are shared and should be treated
-as read-only; absolute external paths and ``WORKTREE`` files remain shared.
+as read-only. External resources remain shared.
 Only mark treatments whose shared resources allow concurrent use.
 
 Concurrency can affect measurements, so the flag and resolved worker limit
@@ -304,7 +312,10 @@ reporting errors, or a failing CLI exit status.
 Ctrl+C stops the whole evaluation: active workers and their commands are
 cancelled on POSIX, queued treatments do not start, and figure generation is
 skipped. Temporary worktrees and their Git registrations are removed after
-workers stop. Completed rows remain saved; unfinished treatments keep explicit
+workers stop. Workers that do not stop within a short grace period are killed;
+pressing Ctrl+C again during cleanup does not interrupt that cleanup. Forced
+termination may leave no command logs for that worker. Completed rows remain
+saved; unfinished treatments keep explicit
 interrupted rows and are eligible for collection on the next invocation.
 After an abrupt process crash, the already-saved placeholders still provide
 row coverage. ``--force`` retains earlier attempts as history.
@@ -339,8 +350,9 @@ by every dependent output.
 callbacks run. Identical level/message pairs are deduplicated across outputs.
 The CLI ends with all warnings followed by all errors. Warnings do not fail
 the command; reporting errors give a failing exit status after the remaining
-outputs have rendered. An exception in a figure is also a reporting error and
-does not prevent the other figures from running.
+outputs have been evaluated. An exception in a figure is also a reporting error.
+Files are published only when rendering succeeds. Errors or Ctrl+C remove
+generated outputs and preserve the measurement database for another attempt.
 
 The interactive page shows derived Warnings and Errors tables. Messages update
 with filtered data; they are not appended to the raw tables. ``--render-only``
@@ -353,24 +365,81 @@ Replay
 ``--invocation ID``. It replays saved selections, including empty requirements, without evaluating
 selectors, resolving Git refs, or collecting. The rendering script and its
 dependencies must remain available. Use ``--only`` when replaying an invocation
-that contained only a subset of outputs. ``--data PATH`` shares a cache across
-output directories; use separate directories for subset reports because old
-unrelated generated files remain in place.
+that contained only a subset of outputs. Every selected benchmark must still be
+declared with the saved data version. A version mismatch fails before rendering;
+run without ``--render-only`` to collect the current version.
+
+Only measurement data is cached. Each invocation regenerates figures, tables,
+macros, and HTML, replacing the previous generated report in its output
+directory. Outputs omitted by ``--only`` or callbacks returning ``None`` are
+removed. ``--data PATH`` shares a measurement cache across output directories;
+use separate output directories to keep several reports. Concurrent invocations
+must use separate output directories. The HTML contains every run referenced by
+its selected outputs, including cached attempts and other commits, together
+with their provenance. Unrelated history remains in the JSON database.
 
 ``run_tables(data)``, ``run_graphs(data)``, the terminal renderer, and
 ``render_to_dir(data, path)`` use data supplied by the caller and never
 collect. The directory renderer writes table JSON sidecars; ``reg.run``
 writes all evaluation data to one JSON file.
 
+Avoid misleading results
+------------------------
+
+Keep measurement dependencies committed or pinned, and record parameters in
+CLI arguments, treatment fields, ``tools``, or ``environment``. An external file
+changing at the same path, an unrecorded environment variable, or a changed Python
+global will not invalidate the cache. Bump the benchmark's ``version`` for changes
+to measurement code, protocol, units, or table meaning. The cache assumes the
+author follows this contract; it cannot establish reproducibility by itself.
+
+Preserving rows does not make every aggregation valid. Count requested,
+successful, timed-out, and failed treatments before computing statistics.
+A mean over successes alone can favor an algorithm that fails on its hardest
+inputs. State the timeout/error policy in captions and report incomplete
+comparisons with ``warn`` or ``error``. Do not turn a missing measurement into
+zero unless zero has that meaning in the experiment.
+
+Join comparison rows by their treatment fields, including sample or phase when
+applicable. Do not pair rows by list position: collection and retry order can
+differ between commits. Check that each side has exactly the expected keys.
+Keep units explicit, and use the intended measurement column: overall attempt
+duration can include build and preparation time.
+
+Rendering and interactive-filter callbacks should be deterministic functions
+of their supplied data. Avoid mutable globals, fresh randomness, and external
+reads. Share statistical calculations between figures, tables, and macros;
+put random seeds in the recorded measurement configuration. Benchmark callbacks
+should also isolate scratch files so one treatment cannot reuse another's output.
+
+Browser numbers must fit JavaScript's exact integer range, from
+``-(2**53 - 1)`` through ``2**53 - 1`` for whole numbers. Report generation and
+computed browser tables reject larger values instead of rounding them. Use
+strings for large identifiers; choose appropriate units or explicit formatting
+for large measurements. The JSON measurement store retains Python integers.
+
 Interactive reports
 -------------------
 
 The HTML uses the same rendering callbacks and saved selections. Rendering
-and filter callbacks must be named top-level functions in one source file,
-or supply ``browser_source=Path(__file__)`` explicitly. Keep execution under
-``if __name__ == '__main__'`` and execution-only imports inside collection
-callbacks or the entry point. Registration is safe during browser imports.
+and filter callbacks must be named top-level functions. They must share one
+source file unless ``browser_source`` supplies the browser module explicitly.
+``reg.run`` checks the selected callbacks before collecting measurements or
+replacing a report, including in render-only mode. This checks export structure;
+Python execution and package availability can still fail during rendering.
+Keep execution under ``if __name__ == '__main__'`` and execution-only imports
+inside collection callbacks or the entry point. Registration is safe during browser imports.
 Treatment selectors can be lambdas or closures: replay does not execute them.
+
+Checkbox filters preserve scalar types: a number and its string spelling are
+separate choices, as are differently capitalized strings. Null and missing cells
+share an option; the empty string is separate. Clearing every checkbox removes
+that column's constraint, as does selecting every option. Checkbox selections,
+column text filters, and the SQL box apply together: a row must pass all of them.
+Editing one leaves the others unchanged; Clear all filters resets them all.
+While a computed filter is being applied, affected raw rows and computed results
+stay hidden until the report is ready; a failed calculation does not display
+stale values. Filter controls remain editable when no rows match.
 
 ``requires`` selects treatments before collection and limits each rendering
 callback to its selected data. Browser filtering does not change these
@@ -403,6 +472,14 @@ preceding interactive filters. Return a new dictionary and preserve other tables
 and metadata with ``{**data, ...}``. Filters chain in registration order. Handle
 empty input tables in graph/table callbacks. Filtering changes the browser view;
 the saved data stays unchanged.
+
+Each filter change recomputes the report. Tables and graphs appear together
+when the calculation for the current filters finishes; results from an older
+filter selection are discarded. Raw tables, computed tables, and diagnostics
+have separate filter controls even when their names match.
+In SQL filters, quote column names that are reserved words or contain spaces,
+for example ``[value] > 10`` or ``[time (ms)] < 1``. Checkbox choices do not
+require SQL syntax.
 
 Open the HTML directly. Raw tables need no Python runtime; computed tables and
 graphs fetch Pyodide and matplotlib from a pinned CDN. The browser never runs

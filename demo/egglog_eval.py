@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Run egglog on workload files from a Git repository."""
+"""Build egglog and run workload files from the same Git commit."""
 from collections import defaultdict
 from statistics import median
 
 import eval_live
 
 
-reg = eval_live.Registry(selection_arguments=["files", "modes", "repository", "binary"],
+reg = eval_live.Registry(selection_arguments=["files", "modes", "repository"],
                          title="Egglog evaluation")
 
 
@@ -40,6 +40,14 @@ def error_rows(treatment, status):
             "rulesets": [{"status": status}]}
 
 
+def build(context):
+    import os
+
+    context.command(["cargo", "build", "--locked", "--release", "-p", "egglog", "--bin", "egglog",
+                     "--target-dir", "target"])
+    return context.directory / "target" / "release" / ("egglog.exe" if os.name == "nt" else "egglog")
+
+
 def measure(context):
     import json
     from pathlib import Path
@@ -49,7 +57,7 @@ def measure(context):
     with tempfile.TemporaryDirectory(prefix="eval-live-egglog-") as temporary:
         summary_path = Path(temporary) / "timing.json"
         result = context.command([
-            context.config["binary"], "--mode", "no-messages", "-j", "1",
+            context.binary, "--mode", "no-messages", "-j", "1",
             "--timing-summary", summary_path,
             *flags[context.config["mode"]], context.config["file"],
         ])
@@ -73,8 +81,7 @@ def main(argv=None):
 
     parser = eval_live.add_arguments(argparse.ArgumentParser(description=__doc__),
                                      output=Path(__file__).resolve().parent / "out" / "egglog")
-    parser.add_argument("--repository", type=Path, required=True, help="Git repository containing the .egg input files")
-    parser.add_argument("--binary", type=Path, required=True, help="egglog executable to run on those files")
+    parser.add_argument("--repository", type=Path, required=True, help="Git repository containing egglog's Cargo workspace and .egg files")
     parser.add_argument("--files", nargs="+", default=["egglog/tests/calc.egg"])
     parser.add_argument("--modes", nargs="+", choices=["off", "proofs", "proof-testing"],
                         default=["off", "proof-testing"])
@@ -84,13 +91,12 @@ def main(argv=None):
     args = parser.parse_args(tokens)
     if args.samples < 1:
         parser.error("--samples must be positive")
-    binary = args.binary.expanduser().resolve()
     treatments = [
-        {"file": file, "mode": mode, "sample": sample, "binary": str(binary), "parallel": args.parallel}
+        {"file": file, "mode": mode, "sample": sample, "parallel": args.parallel}
         for file in args.files for mode in args.modes for sample in range(args.samples)
     ]
-    reg.benchmark("egglog", measure, version="4", error_rows=error_rows, treatments=treatments,
-                  repository=args.repository, inputs=[*args.files, binary], environment={"RUST_LOG": "error"})
+    reg.benchmark("egglog", measure, version="5", error_rows=error_rows, treatments=treatments,
+                  repository=args.repository, build=build, environment={"RUST_LOG": "error"})
     try:
         result = reg.run(args=args, argv=tokens)
     except (ValueError, RuntimeError) as error:
