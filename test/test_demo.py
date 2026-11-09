@@ -36,19 +36,21 @@ class DemoTests(unittest.TestCase):
             self.assertIn("Collected 12; reused 0", run("--samples", "2"))
             self.assertIn("Collected 0; reused 12", run("--samples", "2"))
             repo.rename(directory / "removed-repository")
-            self.assertIn("Collected 0; reused 12", run("--render-only"))
-            self.assertEqual({path.name for path in output.glob("*.json")}, {"results.json", "report-data.json"})
+            replay = directory / "replay"
+            self.assertIn("Collected 0; reused 12", run("--render-only", "--report", str(output / "report.json"),
+                          "--output", str(replay)))
+            self.assertEqual({path.name for path in output.glob("*.json")}, {"results.json", "report-data.json", "report.json"})
             self.assertEqual({path.name for path in output.glob("*.pdf")}, {"runtime.pdf", "history.pdf"})
             self.assertTrue((output / "summary.tex").is_file())
             self.assertTrue((output / "macros.tex").is_file())
             self.assertTrue((output / "index.html").is_file())
             exported = directory / "one-figure"
             self.assertIn("Collected 0; reused 8", run("--render-only", "--only", "runtime",
-                          "--data", str(data_path), "--output", str(exported)))
+                          "--report", str(output / "report.json"), "--output", str(exported)))
             self.assertEqual({path.name for path in exported.iterdir() if not path.name.startswith(".")},
-                             {"runtime.pdf", "index.html", "report-data.json"})
+                             {"runtime.pdf", "index.html", "report-data.json", "report.json"})
             subset_path = exported / "report-data.json"
-            self.assertEqual(len(json.loads(subset_path.read_text())["eval_runs"]), 8)
+            self.assertEqual(len(json.loads(subset_path.read_text())["eval_runs"]), 16)
             replayed = directory / "replayed"
             self.assertIn("Collected 0; reused 8", run("--render-only", "--only", "runtime",
                           "--data", str(subset_path), "--output", str(replayed)))

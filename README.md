@@ -85,7 +85,8 @@ that runtime. The demo writes all data to `demo/out/paper/results.json` and
 paper artifacts alongside it. Run it again to reuse cached observations;
 `--samples 5` changes the demo's configuration, `--only summary` selects a subset, and
 `--dry-run` explains required work without running it. `--render-only` regenerates
-outputs from saved sample selections without the benchmark repository.
+outputs from a report bundle without the benchmark repository; pass
+`--report PATH/report.json` and a different `--output` directory.
 Timeouts are disabled by default; `--timeout 60` opts into a per-command limit.
 Increasing it reuses successes and recollects timed-out treatments. Repeating
 the same deadline reuses timeout rows; ordinary error rows are reused until
@@ -111,10 +112,23 @@ Only measurement data is cached. Figures, tables, macros, and the webpage are
 regenerated on each run. Browser filter changes recompute the report and publish
 its tables and graphs together. Each output directory holds one report; use
 separate directories to retain different subsets or comparisons. Each report
-includes `report-data.json`: a subset in the same format as the full cache,
-containing every run referenced by its outputs, their configurations, saved
-selections, and diagnostics. The HTML embeds the same subset. Unrelated history
-stays in `results.json`.
+includes two files:
+
+- `report-data.json`: the normal cache format, containing all already-collected
+  data for each repository/commit pair used by the report. It includes other
+  treatments, configurations, versions, and attempts from those commits.
+- `report.json`: the selected output IDs and exact runs, resolved CLI arguments
+  and defaults, original command-line tokens, and evaluation script's Git revision.
+
+The HTML embeds the exported data; each figure receives only its selected runs.
+No extra measurements are collected just to fill the export. Figure selections
+belong to the report, never to the measurement cache.
+
+The data retains the collecting script revision and workload commits.
+`report.json` separately records the script revision used to render the figures.
+Uncommitted changes in the script's checkout produce a warning because the saved revision cannot
+reproduce those changes. Commit the evaluation code before generating final
+paper outputs. The script is not copied into a separate file.
 
 Export just one figure and its data to a folder:
 
@@ -122,16 +136,27 @@ Export just one figure and its data to a folder:
 python demo/eval.py --only runtime --data demo/out/paper/results.json --output figures/runtime
 ```
 
-This writes `runtime.pdf`, `index.html`, and `report-data.json`. Recompute the
-figure from that subset with the evaluation script, without the original cache
-or workload repository:
+This writes `runtime.pdf`, `index.html`, `report-data.json`, and `report.json`.
+Keep both JSON files together. Recompute with the current evaluation script
+and its rendering dependencies, without the original cache or workload
+repository:
 
 ```bash
-python demo/eval.py --render-only --only runtime --data figures/runtime/report-data.json --output figures/replayed-runtime
+python demo/eval.py --render-only --report figures/runtime/report.json --output figures/replayed-runtime
 ```
 
 Use a different output directory when replaying an export: its
-`report-data.json` filename is reserved for the newly generated subset.
+`report-data.json` filename is reserved for the newly generated subset. Replay
+uses only the bundled data and recorded runs, leaves those inputs unchanged,
+and records the current script revision for the new figures. It never reads
+or falls back to the normal cache, and never checks out code.
+
+To regenerate with new arguments and your current measurement cache instead,
+run normally. This replaces the figure and its report bundle in that folder:
+
+```bash
+python demo/eval.py --only runtime --samples 5 --data demo/out/paper/results.json --output figures/runtime
+```
 
 Reliable statistics still depend on the evaluation script: pin measurement
 dependencies, count timeouts and failures, join comparisons by treatment
@@ -139,8 +164,9 @@ keys, and keep rendering callbacks deterministic. The [Python guide's advice on
 misleading results](docs/python-guide.rst#avoid-misleading-results) explains these
 risks, measurement units, and the browser's integer limits.
 
-The [Python documentation](docs/index.rst) includes a tutorial, data and filter
-contracts, and API reference generated from docstrings. Build it locally with:
+The [Python documentation](docs/index.rst) includes a tutorial, a
+[CLI reference](docs/cli.rst), data and filter contracts, and API reference
+generated from docstrings. Build it locally with:
 
 ```bash
 pip install -e '.[docs]'

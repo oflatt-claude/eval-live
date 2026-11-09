@@ -13,12 +13,13 @@ tables, and macros. ``demo/eval.py`` is a complete single-script example:
    python demo/eval.py --only summary --sizes 500
    python demo/eval.py --samples 5             # a new CLI configuration
    python demo/eval.py --timeout 60            # opt into a 60-second command limit
-   python demo/eval.py --render-only           # regenerate from saved selections
+   python demo/eval.py --render-only --report demo/out/paper/report.json --output figures/replayed
 
 The demo creates a tiny local Git repository with two commits. No clone or
 compiler is needed. It writes one ``demo/out/paper/results.json`` data/cache
 file plus ``runtime.pdf``, ``history.pdf``, ``summary.tex``, ``macros.tex``, and
-``index.html``. The sibling lock file is writer coordination, not stored data.
+``index.html``. A ``report.json`` generation record and ``report-data.json``
+export accompany the outputs. The sibling lock file is writer coordination, not stored data.
 A first-ever dry-run requires creating the workload repository by running the demo.
 
 Declare treatments and a collection callback
@@ -361,28 +362,34 @@ recomputes messages, so changing figure policy needs no new measurements.
 Replay
 ------
 
-``--render-only`` uses the latest invocation with completed collection, or
-``--invocation ID``. It replays saved selections, including empty requirements, without evaluating
-selectors, resolving Git refs, or collecting. The rendering script and its
-dependencies must remain available. Use ``--only`` when replaying an invocation
-that contained only a subset of outputs. Every selected benchmark must still be
-declared with the saved data version. A version mismatch fails before rendering;
-run without ``--render-only`` to collect the current version.
+``--render-only --report PATH`` reads that report and its sibling
+``report-data.json``. Alternatively, ``--render-only --data PATH/report-data.json``
+finds ``report.json`` alongside the data. Replay requires one of these inputs
+and never reads the normal measurement cache. It renders the outputs listed
+in that report; ``--only`` can narrow them further. Exact saved run selections,
+including empty requirements, are used without evaluating selectors, resolving
+workload Git refs, or collecting measurements. Several bundled commits are
+unambiguous because each requirement records its run IDs.
 
-Only measurement data is cached. Each invocation regenerates figures, tables,
-macros, and HTML, replacing the previous generated report in its output
-directory. Outputs omitted by ``--only`` or callbacks returning ``None`` are
-removed. ``--data PATH`` shares a measurement cache across output directories;
-use separate output directories to keep several reports. Concurrent invocations
-must use separate output directories. The HTML and ``report-data.json`` contain
-every run referenced by the selected outputs, including cached attempts and
-other commits, together with their provenance. Unrelated history remains in
-the full cache.
+Replay uses the current rendering script and dependencies without checking out
+any code. Data collection commits remain unchanged; the new report records the
+script commit used to render its figures. Requirement names and declared
+benchmark versions must match the saved selections. A mismatch fails before
+changing outputs. Changes to selector functions do not change replay selections;
+run normally with ``--data`` to apply new requirements. That uses normal cache
+identity and may collect missing data.
+
+Only measurement data is cached. Each run regenerates figures, tables, macros,
+and HTML, replacing the previous generated report in its output directory.
+Outputs omitted by ``--only`` or callbacks returning ``None`` are removed.
+``--data PATH`` shares a measurement cache across output directories; use
+separate output directories to keep several reports. Concurrent runs must
+use separate output directories.
 
 ``run_tables(data)``, ``run_graphs(data)``, the terminal renderer, and
-``render_to_dir(data, path)`` use data supplied by the caller and never
-collect. The directory renderer writes table JSON sidecars. ``reg.run`` writes
-one complete cache file and exports a cache subset with each generated report.
+``render_to_dir(data, path)`` use data supplied by the caller and never collect.
+The directory renderer writes table JSON sidecars. ``reg.run`` also exports a
+report bundle containing data and generation metadata.
 
 Export one figure and its data
 ------------------------------
@@ -394,29 +401,55 @@ Combine ``--only`` with ``--output`` to generate a folder for one figure. Point
 
    python demo/eval.py --only runtime --data demo/out/paper/results.json --output figures/runtime
 
-Only the selected figure's requirements are collected or reused. The folder
-contains ``runtime.pdf``, ``index.html``, and ``report-data.json``. The exported
-JSON uses the same schema as the cache: measured rows, commit/configuration
-metadata, command diagnostics, and exact saved selections. It contains no
-unrelated runs. Selecting several outputs exports the union of their required
-runs in one file. This also works for tables, macros, and comparisons across commits.
+Only the selected figure's requirements are collected. The folder contains
+``runtime.pdf``, ``index.html``, ``report-data.json``, and ``report.json``.
+The data file uses the normal cache schema and includes **all already-collected
+data from each referenced repository/commit pair**: other treatments,
+configurations, versions, and historical attempts are included. This provides
+more data for future figure changes without collecting extra measurements.
+Other commits remain in the full cache. Comparisons export all referenced commits.
 
-To regenerate from a copied export, keep the evaluation script and its rendering
-dependencies, then run:
+``report.json`` records the output IDs and exact selected runs, all resolved
+arguments and defaults, the original command-line tokens, and the script's Git
+revision. These selections keep the extra exported rows out of the figure's
+input. The cache itself has no figure selections. See :doc:`data-format` for
+both file formats.
+
+Keep the two JSON files together. To regenerate from a copied bundle with the
+evaluation script and its rendering dependencies:
 
 .. code-block:: bash
 
-   python demo/eval.py --render-only --only runtime --data figures/runtime/report-data.json --output figures/replayed-runtime
+   python demo/eval.py --render-only --report figures/runtime/report.json --output figures/replayed-runtime
 
-The original cache and workload repository are unnecessary. Use the same output
-ID and declared benchmark version. No selectors, builds, or collectors run.
-Choose a different output directory: the source cache cannot also be that
-directory's generated ``report-data.json``. Replay records an invocation in
-the supplied cache; copy the export first if it must remain byte-for-byte unchanged.
+The original cache and workload repository are unnecessary. This also works
+with ``--render-only --data figures/runtime/report-data.json``; the sibling
+``report.json`` supplies the selections. Choose a different output directory:
+the source cache cannot also be that directory's generated ``report-data.json``.
+Replay reads the supplied cache without appending an invocation or taking a
+writer lock. The new report records the current script revision and replay
+arguments; the measurement data retains its original collection configuration.
 
-The subset is published with the figures only after rendering succeeds. Errors
-and Ctrl+C remove generated outputs, including a previous subset, while preserving
-the full source cache.
+To apply new CLI arguments and requirements using the current measurement
+cache, run normally. This may collect missing measurements and overwrites the
+figure and bundle in the chosen folder:
+
+.. code-block:: bash
+
+   python demo/eval.py --only runtime --samples 5 --data demo/out/paper/results.json --output figures/runtime
+
+The bundle is published with the figures only after rendering succeeds. Errors
+and Ctrl+C remove generated outputs, including a previous bundle, while
+preserving the source cache. If rendering fails before a report is published,
+run normally again to reuse the collected data and retry rendering.
+
+The data records both the collecting script's commit and the workload commits.
+The report separately records the script's commit at rendering time. Commit your
+evaluation code before generating final outputs. Uncommitted changes anywhere
+in the script's checkout produce a warning and set ``script_dirty`` in the
+record; the revision alone cannot reproduce those changes. Scripts outside
+Git have no recorded revision. The report does not export a standalone script
+copy. Preserve the repository and rendering dependencies as well as the data.
 
 Avoid misleading results
 ------------------------

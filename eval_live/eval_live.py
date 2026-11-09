@@ -378,15 +378,19 @@ class Registry:
         """Collect required observations and write paper outputs, HTML, and their data.
 
         Save all CLI arguments/defaults and data as flat tables in one JSON
-        cache. Export the selected runs and provenance to ``report-data.json``
-        alongside the outputs. It has the same format as the cache and supports
-        replay with the evaluation script. ``--only ID --output DIR`` exports
-        one output and its data. Replay an export into a different directory to
-        keep the source cache separate from generated files.
+        cache. Export all cached attempts from the selected commits to
+        ``report-data.json`` in the same format. ``report.json`` records exact
+        output selections, arguments, and the script's Git revision. Uncommitted
+        changes in the script's checkout produce a warning.
+        ``--only ID --output DIR`` exports one output and its data. Replay an
+        export into a different directory to preserve the source bundle.
 
         ``--timeout`` overrides command deadlines; raising it preserves
         successful samples and recollects timed-out work. ``--dry-run`` inspects
-        the plan; ``--render-only`` replays saved selections without benchmarks.
+        the plan; ``--render-only --report PATH`` replays saved selections without
+        collecting or modifying the bundled input data. The normal cache is
+        never read during replay. The current rendering code runs without a
+        checkout, and its revision is recorded separately from collection commits.
 
         Every requested treatment has measured or explicit error rows. Ctrl+C
         stops collection and rendering. Figure warnings/errors are computed,
