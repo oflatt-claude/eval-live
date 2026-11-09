@@ -540,6 +540,7 @@ class EvaluationTests(unittest.TestCase):
             self.run_eval(reg, render=True, force=True)
         self.assertFalse((self.output / "values.tex").exists())
         self.assertFalse((self.output / "index.html").exists())
+        self.assertFalse((self.output / "report-data.json").exists())
         self.assertTrue(self.data.exists())
 
     def test_interrupt_during_render_or_publication_removes_all_artifacts(self):
@@ -550,7 +551,7 @@ class EvaluationTests(unittest.TestCase):
             if during_publish:
                 replace = Path.replace
                 def interrupt(path, target):
-                    if path.name == "plot.pdf":
+                    if path.name == "values.tex":
                         raise KeyboardInterrupt
                     return replace(path, target)
                 with patch.object(Path, "replace", interrupt), self.assertRaises(KeyboardInterrupt):
@@ -563,6 +564,7 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(list(self.output.glob("*.pdf")), [])
             self.assertEqual(list(self.output.glob("*.tex")), [])
             self.assertFalse((self.output / "index.html").exists())
+            self.assertFalse((self.output / "report-data.json").exists())
             self.assertTrue(self.data.exists())
 
     def test_browser_rejects_unsafe_integers_without_corrupting_saved_data(self):
@@ -959,7 +961,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertFalse((self.output / "index.html").exists())
         self.assertEqual(len(CALLS), 1)
 
-    def test_html_contains_union_of_referenced_runs_and_reachable_provenance(self):
+    def test_report_files_contain_union_of_referenced_runs_and_reachable_provenance(self):
         benchmark = eval_live.Benchmark("read", logged_collect, "1", error_rows=error_rows)
 
         def evaluation(request=None, registry=None):
@@ -990,10 +992,10 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual({row["invocation_id"] for row in embedded["eval_selections"]}, {result.invocation_id})
             self.assertEqual(len(embedded["eval_requirements"]), len([row for row in saved["eval_requirements"]
                              if row["invocation_id"] == result.invocation_id]))
-            # The projection must still be a complete, valid provenance database.
-            report_path = self.root / "report-data.json"
-            report_path.write_text(json.dumps(embedded))
-            eval_live.Store(report_path)
+            # The exported subset is identical to the HTML data and loads as a cache.
+            report_path = self.output / "report-data.json"
+            self.assertEqual(eval_live.Store(report_path).data, embedded)
+            self.assertIn(report_path, result.written)
             self.assertGreater(len(saved["eval_runs"]), len(embedded["eval_runs"]))
             self.assertEqual(len(embedded["eval_processes"]), expected_count)
             for name in ("eval_processes", "eval_commands"):
@@ -1013,6 +1015,53 @@ class EvaluationTests(unittest.TestCase):
                                invocation=original.invocation_id)
         page = check_report(replay, 3)
         self.assertEqual({row["invocation_id"] for row in page["eval_runs"]}, {original.invocation_id})
+
+    def test_single_figure_subset_replays_without_original_cache_or_repository(self):
+        self.run_eval(self.evaluation(self.request(samples=3)))
+        reg = eval_live.Registry()
+        reg.table("Values", table)
+        reg.graph("Plot", figure, requires=self.request(samples=1), id="plot")
+        reg = self.evaluation(registry=reg)
+        output = self.root / "one-figure"
+        result = reg.run(args={"output": output, "data": self.data, "only": ["plot"]}, argv=[])
+        self.assertEqual((result.collected, result.reused), (0, 1))
+        self.assertEqual({path.name for path in result.written}, {"plot.pdf", "index.html", "report-data.json"})
+        self.assertFalse((output / "table.tex").exists())
+        subset = eval_live.Store(output / "report-data.json").data
+        self.assertEqual(len(subset["eval_runs"]), 1)
+        self.assertEqual(len(self.stored()["eval_runs"]), 3)
+        self.assertEqual({row["artifact_id"] for row in subset["eval_requirements"]}, {"plot"})
+        plan = reg.plan(args={"data": output / "report-data.json", "output": self.root / "planned",
+                              "only": ["plot"]})
+        self.assertEqual((plan.missing, plan.reused), (0, 1))
+
+        copied = self.root / "copied.json"
+        copied.write_bytes((output / "report-data.json").read_bytes())
+        self.data.unlink()
+        self.repo.rename(self.root / "unavailable-repository")
+        replayed = self.root / "replayed"
+        with patch("eval_live.targets.Target.resolve", side_effect=AssertionError("must not resolve Git")), \
+                patch("eval_live.planning._Runner._collect", side_effect=AssertionError("must not collect")), \
+                patch("eval_live.planning._Runner._choose", side_effect=AssertionError("must not run selectors")):
+            result = reg.run(args={"output": replayed, "data": copied, "only": ["plot"],
+                                   "render_only": True}, argv=[])
+        self.assertEqual((result.collected, result.reused), (0, 1))
+        self.assertTrue((replayed / "plot.pdf").read_bytes().startswith(b"%PDF"))
+        restored = eval_live.Store(replayed / "report-data.json").data
+        for name in ("measurements", "eval_runs", "eval_configs", "eval_environments"):
+            self.assertEqual(restored[name], subset[name])
+        self.assertEqual(len(CALLS), 3)
+
+    def test_export_path_cannot_overwrite_the_source_cache(self):
+        reg = self.evaluation()
+        self.run_eval(reg, render=True)
+        before = {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()}
+        for replay in (False, True):
+            with self.assertRaisesRegex(ValueError, "reserved for the exported subset"):
+                reg.run(args={"output": self.output, "data": self.output / "report-data.json",
+                              "render_only": replay}, argv=[])
+            self.assertEqual(before, {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()})
+        self.assertEqual(len(CALLS), 1)
 
     def test_build_shared_across_configs_and_skipped_for_cache_hits(self):
         benchmark = eval_live.Benchmark("read", use_binary, "1", build=build, error_rows=error_rows)
@@ -1106,7 +1155,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual([row["data_version"] for row in self.stored()["eval_runs"]], ["1", "2"])
         self.assertEqual([row["value"] for row in self.stored()["measurements"]], [20, 42])
 
-    def test_exports_share_samples_and_write_only_one_json_data_file(self):
+    def test_exports_share_samples_and_write_a_cache_subset(self):
         self.run_eval(self.evaluation(self.request(samples=3)))
         request = self.request(samples=2)
         reg = eval_live.Registry()
@@ -1116,7 +1165,8 @@ class EvaluationTests(unittest.TestCase):
         result = self.run_eval(self.evaluation(registry=reg), render=True)
         self.assertEqual((result.collected, result.reused), (0, 2))
         self.assertEqual(len(reg.run_tables(self.stored())[0]["rows"]), 3)
-        self.assertEqual({p.name for p in self.output.glob("*.json")}, {"results.json"})
+        self.assertEqual({p.name for p in self.output.glob("*.json")}, {"results.json", "report-data.json"})
+        self.assertEqual(len(eval_live.Store(self.output / "report-data.json").data["eval_runs"]), 2)
         self.assertIn(r"\newcommand{\PaperCount}{2}", (self.output / "macros.tex").read_text())
         self.assertIn(r"x\_y \& z", (self.output / "macros.tex").read_text())
         self.assertTrue((self.output / "figure.pdf").read_bytes().startswith(b"%PDF"))

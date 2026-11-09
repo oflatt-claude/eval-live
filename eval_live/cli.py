@@ -27,9 +27,10 @@ def add_arguments(parser: ArgumentParser, *, output: str | Path = "out") -> Argu
     Unknown script arguments affect cache identity unless explicitly excluded
     with ``Registry(selection_arguments=...)``. Every argument is saved.
     """
-    parser.add_argument("--output", type=Path, default=Path(output), help="artifact directory")
+    parser.add_argument("--output", type=Path, default=Path(output), help="directory for artifacts, HTML, and report-data.json")
     parser.add_argument("--data", type=Path, default=None, help="JSON data/cache file (default: OUTPUT/results.json)")
-    parser.add_argument("--only", nargs="+", default=None, metavar="ARTIFACT", help="selected artifact IDs")
+    parser.add_argument("--only", nargs="+", default=None, metavar="ARTIFACT",
+                        help="selected artifact IDs; one ID exports just that output and its data")
     parser.add_argument("--benchmarks", nargs="+", default=None, metavar="BENCHMARK", help="allowed benchmark names")
     parser.add_argument("--commit", default="HEAD", help="target Git commit/ref")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1, metavar="N",

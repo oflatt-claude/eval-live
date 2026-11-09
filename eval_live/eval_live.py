@@ -375,10 +375,16 @@ class Registry:
         return _Runner(self).plan(args=args)
 
     def run(self, *, args=None, argv=None):
-        """Collect required observations and write paper outputs plus HTML.
+        """Collect required observations and write paper outputs, HTML, and their data.
 
         Save all CLI arguments/defaults and data as flat tables in one JSON
-        file. ``--timeout`` overrides command deadlines; raising it preserves
+        cache. Export the selected runs and provenance to ``report-data.json``
+        alongside the outputs. It has the same format as the cache and supports
+        replay with the evaluation script. ``--only ID --output DIR`` exports
+        one output and its data. Replay an export into a different directory to
+        keep the source cache separate from generated files.
+
+        ``--timeout`` overrides command deadlines; raising it preserves
         successful samples and recollects timed-out work. ``--dry-run`` inspects
         the plan; ``--render-only`` replays saved selections without benchmarks.
 

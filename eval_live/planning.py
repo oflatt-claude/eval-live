@@ -18,7 +18,7 @@ import uuid
 from .eval_live import Registry, _Output
 from .benchmarks import Benchmark, ProcessError, RunContext
 from .cli import CONTROL_ARGUMENTS
-from .render import browser_callbacks, discard_outputs, render_artifacts, report_data
+from .render import REPORT_DATA, browser_callbacks, discard_outputs, render_artifacts, report_data
 from .store import Store, digest, parameter_rows, parameters, readonly_parameters, run_identity
 from .targets import Target, script_revision
 from ._workers import Outcome, Worker, completed, ignore_interrupts, measure
@@ -206,6 +206,10 @@ class _Runner:
         path = Path(options["data"] or Path(options["output"]) / "results.json").expanduser().resolve()
         if path.suffix.lower() != ".json":
             raise ValueError("the data/cache file must have a .json extension")
+        snapshot = (Path(options["output"]).expanduser() / REPORT_DATA).resolve()
+        if path == snapshot:
+            raise ValueError(f"{REPORT_DATA} in the output directory is reserved for the exported subset; "
+                             "choose a different --output directory or --data path")
         return path
 
     def plan(self, *, args: Namespace | Mapping | None = None) -> Plan:

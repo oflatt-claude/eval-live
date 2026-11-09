@@ -17,6 +17,7 @@ from . import latex
 from .store import atomic_write, scalar
 
 PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyodide.js"
+REPORT_DATA = "report-data.json"
 
 
 def discard_outputs(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", table_json=False):
@@ -28,7 +29,7 @@ def discard_outputs(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", ta
     names = {f"{item.id}.{fmt if item.kind == 'graph' else 'tex'}" for item in artifacts}
     if table_json:
         names.update(f"{item.id}.json" for item in artifacts if item.kind == "table")
-    names.add("index.html")
+    names.update(("index.html", REPORT_DATA))
     manifest = output / ".eval-live-outputs"
     if manifest.exists():
         names.update(manifest.read_text().splitlines())
@@ -112,7 +113,7 @@ def browser_callbacks(artifacts: Sequence[_Output], source: str | Path | None) -
 
 
 def report_data(data: dict, selections: dict, invocation_id: str) -> dict:
-    """Select all referenced runs and their provenance for a generated report.
+    """Select all referenced runs and their provenance in the cache format.
 
     Include cached runs from earlier invocations and other commits. Keep the
     current output requirements, including empty selections, and invocation
@@ -268,12 +269,14 @@ def _render_outputs(data, registry, output, *, fmt="pdf", dpi=150, table_json=Fa
 
 def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
                      output: Path, *, source: str | Path | None, title: str) -> list[Path]:
-    """Render saved per-output selections to paper files, the terminal, and HTML.
+    """Render saved selections to paper files, the terminal, HTML, and a data subset.
 
     Tables and macros are evaluated once for files and terminal output. The HTML
-    contains callbacks for browser execution. Reported errors raise RuntimeError
-    before publishing files; warnings allow publication. Diagnostics are printed
-    as they occur and summarized by level, with duplicate messages removed.
+    contains callbacks for browser execution. ``report-data.json`` contains the
+    same selected data in the cache format, usable with ``--render-only --data``.
+    Reported errors raise RuntimeError before publishing files; warnings allow
+    publication. Diagnostics are printed as they occur and summarized by level,
+    with duplicate messages removed.
     """
     registry = Registry()
     registry._outputs = list(artifacts)
@@ -296,6 +299,9 @@ def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
                                           source=source, title=title))
             if registry.run_messages()[1]["rows"]:
                 raise RuntimeError("rendering reported errors")
+            snapshot = staging / REPORT_DATA
+            atomic_write(snapshot, json.dumps(data, indent=2, allow_nan=False) + "\n")
+            written.append(snapshot)
     finally:
         for table in registry.run_messages():
             if table["rows"]:

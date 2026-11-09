@@ -91,10 +91,14 @@ writer holds ``results.json.lock``; concurrent writers fail immediately. The
 lock file can remain after exit, but the lock is released when the writer
 stops. Benchmark results are stored only in the JSON file.
 
-The generated HTML contains the union of runs referenced by the selected
-figures, tables, and macros. This includes reused attempts and comparisons
+The generated HTML and ``report-data.json`` contain the union of runs referenced
+by the selected figures, tables, and macros. This includes reused attempts and comparisons
 across commits, with their configurations, environments, command
 logs, and collecting invocations. It also includes the current invocation's
 arguments and output selections, plus any replay ancestry. Empty requirements
 remain represented. Unrelated attempts and historical output selections stay
-in the JSON database and are not embedded in the page.
+in the full cache. ``report-data.json`` uses this same schema and is accepted
+by ``Store`` and ``--data``. With ``--render-only`` and the evaluation script,
+its saved selections reproduce the selected outputs without the original cache
+or workload repository. Use a different output directory to keep the source
+cache separate from the generated subset.

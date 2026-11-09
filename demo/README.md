@@ -17,6 +17,7 @@ across the artifact declarations.
 | File in `demo/out/paper/` | Contents |
 | --- | --- |
 | `results.json` | All flat measurement tables, CLI arguments, commit/configuration provenance, process diagnostics, and exact artifact sample selections |
+| `report-data.json` | Cache-format subset containing only the runs referenced by this report and their provenance |
 | `runtime.pdf` | Current-commit list and set timings |
 | `history.pdf` | The same configuration at two different commits |
 | `summary.tex` | Median timings as a LaTeX table |
@@ -45,6 +46,24 @@ use `--invocation ID` to choose a complete run. No benchmark repository is
 needed for render-only use. Use `--data PATH` to share a cache across artifact
 output directories. Every option and its default is recorded, even options
 that do not affect measurement identity.
+
+To put one figure and just its data in a separate folder:
+
+```bash
+python demo/eval.py --only runtime --data demo/out/paper/results.json --output figures/runtime
+```
+
+The folder contains `runtime.pdf`, `index.html`, and `report-data.json`. Regenerate
+it using the exported subset instead of the full cache:
+
+```bash
+python demo/eval.py --render-only --only runtime --data figures/runtime/report-data.json --output figures/replayed-runtime
+```
+
+Keep this evaluation script and its Python dependencies; the original workload
+repository is unnecessary for replay. Use a different output directory so the
+new export cannot overwrite the source cache. The same commands work with
+`--only history` for a comparison across commits.
 
 The demo defines `--samples` itself and includes a `sample` index in each
 treatment. Both the total CLI count and the individual index affect cache
@@ -91,7 +110,8 @@ measurements share machine resources, so use `--jobs 1` for sequential timings.
 Timings are illustrative and vary with machine load. Container construction is
 outside the timed region. Each invocation replaces the generated report;
 files for unselected outputs are removed. Use separate output directories to
-keep several reports. The HTML includes the runs referenced by its outputs;
+keep several reports. The HTML and `report-data.json` include the runs
+referenced by their outputs;
 `results.json` retains the complete history. The sibling `.lock` file is writer
 coordination, not stored data.
 

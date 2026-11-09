@@ -8,7 +8,7 @@ subsets of the work.
 
 All command-line arguments, including their defaults, belong with the data so
 that results can be reproduced. All evaluation data should be stored as flat
-tables in a single output file, with one row per observation and explicit
+tables in a single cache file, with one row per observation and explicit
 columns identifying the commit and configuration.
 
 The workflow starts with a list of figures, tables, and macros. Each
@@ -110,9 +110,28 @@ interrupted invocation removes generated outputs while preserving saved data.
 Only measurement data is cached. Figures, tables, macros, and the webpage are
 regenerated on each run. Browser filter changes recompute the report and publish
 its tables and graphs together. Each output directory holds one report; use
-separate directories to retain different subsets or comparisons. The HTML embeds
-all runs referenced by those outputs, including cached runs and other commits,
-with their configurations and diagnostics. Unrelated history stays in `results.json`.
+separate directories to retain different subsets or comparisons. Each report
+includes `report-data.json`: a subset in the same format as the full cache,
+containing every run referenced by its outputs, their configurations, saved
+selections, and diagnostics. The HTML embeds the same subset. Unrelated history
+stays in `results.json`.
+
+Export just one figure and its data to a folder:
+
+```bash
+python demo/eval.py --only runtime --data demo/out/paper/results.json --output figures/runtime
+```
+
+This writes `runtime.pdf`, `index.html`, and `report-data.json`. Recompute the
+figure from that subset with the evaluation script, without the original cache
+or workload repository:
+
+```bash
+python demo/eval.py --render-only --only runtime --data figures/runtime/report-data.json --output figures/replayed-runtime
+```
+
+Use a different output directory when replaying an export: its
+`report-data.json` filename is reserved for the newly generated subset.
 
 Reliable statistics still depend on the evaluation script: pin measurement
 dependencies, count timeouts and failures, join comparisons by treatment

@@ -374,14 +374,49 @@ macros, and HTML, replacing the previous generated report in its output
 directory. Outputs omitted by ``--only`` or callbacks returning ``None`` are
 removed. ``--data PATH`` shares a measurement cache across output directories;
 use separate output directories to keep several reports. Concurrent invocations
-must use separate output directories. The HTML contains every run referenced by
-its selected outputs, including cached attempts and other commits, together
-with their provenance. Unrelated history remains in the JSON database.
+must use separate output directories. The HTML and ``report-data.json`` contain
+every run referenced by the selected outputs, including cached attempts and
+other commits, together with their provenance. Unrelated history remains in
+the full cache.
 
 ``run_tables(data)``, ``run_graphs(data)``, the terminal renderer, and
 ``render_to_dir(data, path)`` use data supplied by the caller and never
-collect. The directory renderer writes table JSON sidecars; ``reg.run``
-writes all evaluation data to one JSON file.
+collect. The directory renderer writes table JSON sidecars. ``reg.run`` writes
+one complete cache file and exports a cache subset with each generated report.
+
+Export one figure and its data
+------------------------------
+
+Combine ``--only`` with ``--output`` to generate a folder for one figure. Point
+``--data`` at the shared cache to reuse measurements:
+
+.. code-block:: bash
+
+   python demo/eval.py --only runtime --data demo/out/paper/results.json --output figures/runtime
+
+Only the selected figure's requirements are collected or reused. The folder
+contains ``runtime.pdf``, ``index.html``, and ``report-data.json``. The exported
+JSON uses the same schema as the cache: measured rows, commit/configuration
+metadata, command diagnostics, and exact saved selections. It contains no
+unrelated runs. Selecting several outputs exports the union of their required
+runs in one file. This also works for tables, macros, and comparisons across commits.
+
+To regenerate from a copied export, keep the evaluation script and its rendering
+dependencies, then run:
+
+.. code-block:: bash
+
+   python demo/eval.py --render-only --only runtime --data figures/runtime/report-data.json --output figures/replayed-runtime
+
+The original cache and workload repository are unnecessary. Use the same output
+ID and declared benchmark version. No selectors, builds, or collectors run.
+Choose a different output directory: the source cache cannot also be that
+directory's generated ``report-data.json``. Replay records an invocation in
+the supplied cache; copy the export first if it must remain byte-for-byte unchanged.
+
+The subset is published with the figures only after rendering succeeds. Errors
+and Ctrl+C remove generated outputs, including a previous subset, while preserving
+the full source cache.
 
 Avoid misleading results
 ------------------------
