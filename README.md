@@ -8,7 +8,7 @@ subsets of the work.
 
 All command-line arguments, including their defaults, belong with the data so
 that results can be reproduced. All evaluation data should be stored as flat
-tables in a single output file, with one row per observation and explicit
+tables in a single cache file, with one row per observation and explicit
 columns identifying the commit and configuration.
 
 The workflow starts with a list of figures, tables, and macros. Each
@@ -81,11 +81,10 @@ python demo/eval.py
 
 Open `demo/out/paper/index.html` for the interactive report. Its Python graphs and
 computed tables load Pyodide and matplotlib from a CDN; raw tables work without
-that runtime. The demo writes all data to `demo/out/paper/results.json` and
-paper artifacts alongside it. Run it again to reuse cached observations;
+that runtime. The demo keeps its measurement cache in `demo/out/cache.json`
+and writes paper artifacts to `demo/out/paper/`. Run it again to reuse cached observations;
 `--samples 5` changes the demo's configuration, `--only summary` selects a subset, and
-`--dry-run` explains required work without running it. `--render-only` regenerates
-outputs from saved sample selections without the benchmark repository.
+`--dry-run` explains required work without running it.
 Timeouts are disabled by default; `--timeout 60` opts into a per-command limit.
 Increasing it reuses successes and recollects timed-out treatments. Repeating
 the same deadline reuses timeout rows; ordinary error rows are reused until
@@ -107,12 +106,63 @@ Reporting errors fail the CLI after other outputs are evaluated; warnings do not
 Generated files are published only after successful rendering. A failed or
 interrupted invocation removes generated outputs while preserving saved data.
 
-Only measurement data is cached. Figures, tables, macros, and the webpage are
-regenerated on each run. Browser filter changes recompute the report and publish
-its tables and graphs together. Each output directory holds one report; use
-separate directories to retain different subsets or comparisons. The HTML embeds
-all runs referenced by those outputs, including cached runs and other commits,
-with their configurations and diagnostics. Unrelated history stays in `results.json`.
+Only measurement data is cached. Before collection or rendering starts,
+eval-live clears **all files in the output directory**, including hidden and
+unrecognized files. It stops before deleting anything if it finds a subdirectory
+or symlink. Keep source files and caches outside it. The default
+cache is `cache.json` beside the output directory; the demo's workload repository
+is also outside `paper/`, in `demo/out/repository/`. Validation failures and
+`--dry-run` leave existing outputs untouched.
+
+Figures, tables, macros, and the webpage are regenerated on each run. Browser
+filter changes recompute the report and publish its tables and graphs together.
+Use separate output directories to retain different reports. Each report
+includes two files:
+
+- `results.json`: the normal cache format, containing all already-collected
+  data for each repository/commit pair used by the report. It includes other
+  treatments, configurations, versions, and attempts from those commits.
+- `reproduce.json`: the selected output IDs and exact runs, resolved CLI arguments
+  and defaults, original command-line tokens, and evaluation script's Git revision.
+
+The HTML embeds the exported data; each figure receives only its selected runs.
+No extra measurements are collected just to fill the export. Figure selections
+belong to the report, never to the measurement cache.
+
+The data retains the collecting script revision and workload commits.
+`reproduce.json` separately records the script revision used to render the figures.
+Uncommitted changes in the script's checkout produce a warning: the saved
+revision cannot reproduce those changes. Commit the evaluation code before
+generating final paper outputs.
+
+Export just one figure and its data to a folder:
+
+```bash
+python demo/eval.py --only runtime --data demo/out/cache.json --output figures/runtime
+```
+
+This writes `runtime.pdf`, `index.html`, `results.json`, and `reproduce.json`.
+Keep both JSON files together. Recompute with the current evaluation script
+and its rendering dependencies, without the original cache or workload
+repository:
+
+```bash
+python demo/eval.py --render-only --report figures/runtime/reproduce.json \
+    --output figures/replayed-runtime
+```
+
+Replay requires a different output directory and leaves the input bundle
+unchanged. It uses only the bundled data and recorded selections, with no
+fallback to the normal cache or Git checkout. The new report records the
+current script's revision.
+
+To regenerate with new arguments and your current measurement cache instead,
+run normally. This replaces the figure and its report bundle in that folder:
+
+```bash
+python demo/eval.py --only runtime --samples 5 --data demo/out/cache.json \
+    --output figures/runtime
+```
 
 Reliable statistics still depend on the evaluation script: pin measurement
 dependencies, count timeouts and failures, join comparisons by treatment
@@ -120,8 +170,9 @@ keys, and keep rendering callbacks deterministic. The [Python guide's advice on
 misleading results](docs/python-guide.rst#avoid-misleading-results) explains these
 risks, measurement units, and the browser's integer limits.
 
-The [Python documentation](docs/index.rst) includes a tutorial, data and filter
-contracts, and API reference generated from docstrings. Build it locally with:
+The [Python documentation](docs/index.rst) includes a tutorial, a
+[CLI reference](docs/cli.rst), data and filter contracts, and API reference
+generated from docstrings. Build it locally with:
 
 ```bash
 pip install -e '.[docs]'

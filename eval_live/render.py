@@ -6,6 +6,7 @@ import html
 import inspect
 import io
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -14,52 +15,85 @@ from typing import Sequence
 
 from .eval_live import Registry, _Output
 from . import latex
-from .store import atomic_write, scalar
+from .store import atomic_write, parameters, scalar, validate_tables
 
 PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyodide.js"
+REPORT_DATA = "results.json"
+REPORT = "reproduce.json"
 
 
-def discard_outputs(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", table_json=False):
-    """Remove expected artifacts, HTML, and files recorded by previous rendering.
+def source_paths(functions) -> list[Path]:
+    """Return inspectable callback source files for output-path validation."""
+    paths = []
+    for function in functions:
+        try:
+            filename = inspect.getsourcefile(function)
+        except TypeError:
+            continue
+        if filename:
+            paths.append(Path(filename))
+    return paths
 
-    Generated filenames are reserved for eval-live. Files at other paths,
-    including the measurement database, are preserved. Missing files are allowed.
+
+def validate_output(output: Path, protected=()) -> Path:
+    """Reject output paths that would erase working directories or known inputs.
+
+    The output cannot be a symlink, a Git checkout root, or contain the current
+    directory, home directory, or any protected path. Its existing contents
+    must contain no subdirectories or symlinks. Return its resolved path.
     """
-    names = {f"{item.id}.{fmt if item.kind == 'graph' else 'tex'}" for item in artifacts}
-    if table_json:
-        names.update(f"{item.id}.json" for item in artifacts if item.kind == "table")
-    names.add("index.html")
-    manifest = output / ".eval-live-outputs"
-    if manifest.exists():
-        names.update(manifest.read_text().splitlines())
-    for name in names:
-        if name and Path(name).name == name and name not in (".", ".."):
-            (output / name).unlink(missing_ok=True)
-    manifest.unlink(missing_ok=True)
+    output = output.expanduser()
+    if output.is_symlink():
+        raise ValueError("the output directory must not be a symlink")
+    resolved = output.resolve()
+    if (resolved / ".git").exists():
+        raise ValueError("the output directory must not be a Git checkout root")
+    for path in (Path.cwd(), Path.home(), *protected):
+        path = Path(path).expanduser()
+        if (path.resolve().is_relative_to(resolved)
+                or Path(os.path.abspath(path)).is_relative_to(Path(os.path.abspath(output)))):
+            raise ValueError(f"output directory would delete protected input {path}; "
+                             "keep the cache, replay inputs, and sources outside --output")
+    if resolved.exists():
+        for path in resolved.iterdir():
+            if path.is_symlink() or path.is_dir():
+                kind = "symlink" if path.is_symlink() else "subdirectory"
+                raise ValueError(f"output directory contains an unexpected {kind}: {path}; "
+                                 "inspect and clear it manually before running")
+    return resolved
+
+
+def discard_outputs(output: Path):
+    """Clear every entry in a dedicated output directory, including hidden files.
+
+    Refuse subdirectories or symlinks before deleting any entries. The caller
+    must validate input paths first. Missing output directories are allowed.
+    """
+    output = validate_output(output)
+    if output.exists():
+        for path in output.iterdir():
+            path.unlink()
 
 
 @contextmanager
-def output_directory(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", table_json=False):
-    """Yield an empty staging directory and publish its files on successful exit.
+def output_directory(output: Path):
+    """Clear an output directory and publish staged files on successful exit.
 
-    Write only direct child files there. Previous generated outputs are removed
-    on entry; exceptions, including Ctrl+C, remove partially published outputs
-    and propagate. The caller must prevent concurrent rendering to ``output``.
+    Write only direct child files to the staging directory. Exceptions,
+    including Ctrl+C, remove partially published files and propagate. The
+    caller must protect inputs and prevent concurrent rendering to ``output``.
     """
+    output = validate_output(output)
     output.mkdir(parents=True, exist_ok=True)
-    discard_outputs(output, artifacts, fmt=fmt, table_json=table_json)
-    with tempfile.TemporaryDirectory(prefix=".eval-live-", dir=output) as temporary:
+    discard_outputs(output)
+    with tempfile.TemporaryDirectory(prefix=".eval-live-", dir=output.parent) as temporary:
         staging = Path(temporary)
         try:
             yield staging
-            names = sorted(path.name for path in staging.iterdir())
-            # Record the whole set before moving files so cleanup also covers a
-            # failure partway through publication.
-            atomic_write(output / ".eval-live-outputs", "\n".join(names) + "\n")
-            for name in names:
-                (staging / name).replace(output / name)
+            for path in sorted(staging.iterdir()):
+                path.replace(output / path.name)
         except BaseException:
-            discard_outputs(output, artifacts, fmt=fmt, table_json=table_json)
+            discard_outputs(output)
             raise
 
 
@@ -111,31 +145,22 @@ def browser_callbacks(artifacts: Sequence[_Output], source: str | Path | None) -
     return source_for(artifacts, source), descriptors
 
 
-def report_data(data: dict, selections: dict, invocation_id: str) -> dict:
-    """Select all referenced runs and their provenance for a generated report.
+def report_data(data: dict, selections: dict) -> dict:
+    """Export all cached attempts for the repository/commit pairs used by outputs.
 
-    Include cached runs from earlier invocations and other commits. Keep the
-    current output requirements, including empty selections, and invocation
-    ancestry; omit unrelated runs and historical output selections. The complete
-    database is unchanged, and empty tables retain their names.
+    Preserve every configuration, version, outcome, and collecting invocation
+    for those commits, including attempts not selected by any output. No extra
+    measurements are collected. Empty tables retain their names.
     """
-    ids = {run_id for scopes in selections.values() for runs in scopes.values() for run_id in runs}
-    runs = [row for row in data["eval_runs"] if row["run_id"] in ids]
+    selected = {run_id for scopes in selections.values() for runs in scopes.values() for run_id in runs}
+    commits = {(row["repository"], row["commit"]) for row in data["eval_runs"] if row["run_id"] in selected}
+    runs = [row for row in data["eval_runs"] if (row["repository"], row["commit"]) in commits]
+    ids = {row["run_id"] for row in runs}
     configs = {row["config_id"] for row in runs}
     environments = {row["environment_id"] for row in runs}
-    invocations = {row["invocation_id"]: row for row in data["eval_invocations"]}
-    included = set()
-    pending = {invocation_id, *(row["invocation_id"] for row in runs)}
-    while pending:
-        identity = pending.pop()
-        included.add(identity)
-        source = invocations[identity].get("source_invocation")
-        if source is not None and source not in included:
-            pending.add(source)
+    invocations = {row["invocation_id"] for row in runs}
 
     def keep(name, row):
-        if name in ("eval_requirements", "eval_selections"):
-            return row["invocation_id"] == invocation_id and row["artifact_id"] in selections
         if "run_id" in row:
             return row["run_id"] in ids
         if "config_id" in row:
@@ -143,10 +168,38 @@ def report_data(data: dict, selections: dict, invocation_id: str) -> dict:
         if "environment_id" in row:
             return row["environment_id"] in environments
         if "invocation_id" in row:
-            return row["invocation_id"] in included
+            return row["invocation_id"] in invocations
         return name == "eval_metadata"
 
     return {name: [dict(row) for row in rows if keep(name, row)] for name, rows in data.items()}
+
+
+def read_report(path: Path, data: dict) -> dict:
+    """Read a generation record; reject malformed or unavailable run selections."""
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        if type(report["schema_version"]) is not int or report["schema_version"] != 1:
+            raise ValueError("unsupported report schema")
+        if report["data"] != REPORT_DATA:
+            raise ValueError(f"report data must be {REPORT_DATA}")
+        parameters(report["arguments"])
+        validate_tables({"invocation": [report["invocation"]]})
+        if not isinstance(report["invocation"]["invocation_id"], str):
+            raise ValueError("missing invocation identity")
+        if not isinstance(report["argv"], list) or any(not isinstance(token, str) for token in report["argv"]):
+            raise ValueError("invalid report argv")
+        runs = {row["run_id"] for row in data["eval_runs"]}
+        for artifact, scopes in report["selections"].items():
+            if not isinstance(artifact, str) or not artifact or not isinstance(scopes, dict):
+                raise ValueError("invalid output selection")
+            for name, ids in scopes.items():
+                if (not isinstance(name, str) or not name or not isinstance(ids, list)
+                        or any(not isinstance(run, str) or run not in runs for run in ids)
+                        or len(set(ids)) != len(ids)):
+                    raise ValueError("invalid or unavailable selected runs")
+        return report
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+        raise ValueError(f"invalid or unavailable report in {path}: {error}") from error
 
 
 def write_html(path: str | Path, data: dict, artifacts: Sequence[_Output], selections: dict,
@@ -204,14 +257,17 @@ eval_live.registry = _reg
 
 def render_outputs(data: dict, registry: Registry, output: str | Path, *,
                    fmt: str = "pdf", dpi: int = 150, table_json: bool = False) -> list[Path]:
-    """Replace generated files using supplied data and return their paths.
+    """Clear the output directory, render supplied data, and return file paths.
 
+    Every existing file is removed. Subdirectories and symlinks are rejected
+    before deletion; keep inputs elsewhere.
     Evaluate each output once. ``None`` omits a graph. With ``table_json=True``,
     nonempty tables produce JSON and LaTeX; otherwise even empty tables produce
     a LaTeX file. Exceptions leave no generated report. No measurements are run.
     """
     output = Path(output)
-    with output_directory(output, registry._outputs, fmt=fmt, table_json=table_json) as staging:
+    validate_output(output, source_paths(item.render for item in registry._outputs))
+    with output_directory(output) as staging:
         written, _ = _render_outputs(data, registry, staging, fmt=fmt, dpi=dpi, table_json=table_json,
                                      capture_errors=False)
     return [output / path.name for path in written]
@@ -267,13 +323,13 @@ def _render_outputs(data, registry, output, *, fmt="pdf", dpi=150, table_json=Fa
 
 
 def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
-                     output: Path, *, source: str | Path | None, title: str) -> list[Path]:
-    """Render saved per-output selections to paper files, the terminal, and HTML.
+                     output: Path, *, source: str | Path | None, title: str, report: dict) -> list[Path]:
+    """Publish paper files, HTML, cache-format data, and their generation record.
 
-    Tables and macros are evaluated once for files and terminal output. The HTML
-    contains callbacks for browser execution. Reported errors raise RuntimeError
-    before publishing files; warnings allow publication. Diagnostics are printed
-    as they occur and summarized by level, with duplicate messages removed.
+    Evaluate tables and macros once for files and terminal output. Rendered
+    outputs use exact selections; raw HTML and exported data include every
+    cached attempt from the selected commits. Reported errors prevent
+    publication. Diagnostics are deduplicated and summarized by level.
     """
     registry = Registry()
     registry._outputs = list(artifacts)
@@ -286,8 +342,14 @@ def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
 
     registry._message_handler = message
     registry._selections = selections
+    if report["invocation"]["script_dirty"]:
+        warning = ("The evaluation script's checkout has uncommitted changes; "
+                   "the recorded script commit cannot reproduce those changes. Commit before generating a final report.")
+        registry._messages[None] = {("warning", warning): None}
+        message("warning", warning)
     try:
-        with output_directory(output, artifacts) as staging:
+        validate_output(output, source_paths(item.render for item in artifacts))
+        with output_directory(output) as staging:
             written, tables = _render_outputs(data, registry, staging)
             if artifacts:
                 from . import console
@@ -296,6 +358,12 @@ def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
                                           source=source, title=title))
             if registry.run_messages()[1]["rows"]:
                 raise RuntimeError("rendering reported errors")
+            snapshot = staging / REPORT_DATA
+            atomic_write(snapshot, json.dumps(data, indent=2, allow_nan=False) + "\n")
+            written.append(snapshot)
+            record = staging / REPORT
+            atomic_write(record, json.dumps(report, indent=2, allow_nan=False) + "\n")
+            written.append(record)
     finally:
         for table in registry.run_messages():
             if table["rows"]:

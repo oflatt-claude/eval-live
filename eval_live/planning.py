@@ -18,7 +18,8 @@ import uuid
 from .eval_live import Registry, _Output
 from .benchmarks import Benchmark, ProcessError, RunContext
 from .cli import CONTROL_ARGUMENTS
-from .render import browser_callbacks, discard_outputs, render_artifacts, report_data
+from .render import (REPORT, REPORT_DATA, browser_callbacks, discard_outputs, read_report,
+                     render_artifacts, report_data, source_paths, validate_output)
 from .store import Store, digest, parameter_rows, parameters, readonly_parameters, run_identity
 from .targets import Target, script_revision
 from ._workers import Outcome, Worker, completed, ignore_interrupts, measure
@@ -175,7 +176,7 @@ class _Runner:
     def _options(args: Namespace | Mapping | None) -> dict:
         supplied = vars(args) if isinstance(args, Namespace) else dict(args or {})
         options = dict(output="out", data=None, only=None, benchmarks=None, force=False,
-                       dry_run=False, render_only=False, invocation=None, timeout=None,
+                       dry_run=False, render_only=False, report=None, timeout=None,
                        commit="HEAD", jobs=os.cpu_count() or 1)
         options.update(parameters(supplied))
         if type(options["jobs"]) is not int or options["jobs"] < 1:
@@ -185,8 +186,10 @@ class _Runner:
             raise ValueError("timeout must be a finite positive number of seconds")
         if options["render_only"] and (options["force"] or options["dry_run"]):
             raise ValueError("--render-only cannot be combined with --force or --dry-run")
-        if options["invocation"] and not options["render_only"]:
-            raise ValueError("--invocation requires --render-only")
+        if "invocation" in supplied:
+            raise ValueError("use --report PATH to replay a saved report")
+        if options["report"] and not options["render_only"]:
+            raise ValueError("--report requires --render-only")
         return options
 
     def _artifacts(self, options: dict) -> list[_Output]:
@@ -202,10 +205,34 @@ class _Runner:
         return [by_id[name] for name in names]
 
     @staticmethod
-    def _data_path(options: dict) -> Path:
-        path = Path(options["data"] or Path(options["output"]) / "results.json").expanduser().resolve()
+    def _report_path(options: dict) -> Path:
+        if options["report"]:
+            return Path(options["report"]).expanduser().resolve()
+        if options["data"]:
+            return Path(options["data"]).expanduser().resolve().with_name(REPORT)
+        raise ValueError("--render-only requires --report PATH (or --data PATH/results.json)")
+
+    def _data_path(self, options: dict) -> Path:
+        if options["render_only"]:
+            path = self._report_path(options).with_name(REPORT_DATA)
+            if options["data"] and Path(options["data"]).expanduser().resolve() != path:
+                raise ValueError("replay uses only the report's sibling results.json; "
+                                 "omit --data, or run without --render-only to use a measurement cache")
+            if not path.is_file():
+                raise ValueError(f"missing report data: {path}")
+        else:
+            path = Path(options["data"] or Path(options["output"]).expanduser().parent / "cache.json").expanduser().resolve()
         if path.suffix.lower() != ".json":
             raise ValueError("the data/cache file must have a .json extension")
+        protected = [path]
+        protected.extend(Path(options[name]) for name in ("data", "report") if options[name])
+        if options["render_only"]:
+            protected.append(self._report_path(options))
+        if isinstance(self.browser_source, Path):
+            protected.append(self.browser_source)
+        callbacks = [fn for item in self.artifacts for fn in (item.render, item.interactive_filter)]
+        callbacks.extend(fn for spec in self.benchmarks.values() for fn in (spec.run, spec.build, spec.error_rows))
+        validate_output(Path(options["output"]), [*protected, *source_paths(callbacks)])
         return path
 
     def plan(self, *, args: Namespace | Mapping | None = None) -> Plan:
@@ -307,6 +334,16 @@ class _Runner:
                 plan.requirements[artifact.id][name] = requirements
         return plan
 
+    def _invocation_metadata(self):
+        """Describe the executing script independently of the workload revisions."""
+        script = self.browser_source if isinstance(self.browser_source, Path) else None
+        if script is None:
+            filename = inspect.getsourcefile(self.artifacts[0].render)
+            script = Path(filename).resolve() if filename else None
+        return dict(invocation_id=str(uuid.uuid4()), started_at=now(), finished_at=None,
+                    status="running", collection_complete=False, cwd=str(Path.cwd()), python=platform.python_version(),
+                    platform=platform.platform(), **script_revision(script))
+
     @contextmanager
     def _invocation(self, store: Store, options: dict, argv: Sequence[str]):
         """Record an invocation and checkpoint its final status, including Ctrl+C."""
@@ -316,13 +353,7 @@ class _Runner:
         for row in store.data["eval_runs"]:
             if row["status"] in ("pending", "running"):
                 row.update(status="interrupted", finished_at=now(), error="previous writer stopped before completing this attempt")
-        script = self.browser_source if isinstance(self.browser_source, Path) else None
-        if script is None:
-            filename = inspect.getsourcefile(self.artifacts[0].render)
-            script = Path(filename).resolve() if filename else None
-        invocation = dict(invocation_id=str(uuid.uuid4()), started_at=now(), finished_at=None,
-                          status="running", collection_complete=False, cwd=str(Path.cwd()), python=platform.python_version(),
-                          platform=platform.platform(), **script_revision(script))
+        invocation = self._invocation_metadata()
         store.data["eval_invocations"].append(invocation)
         store.data["eval_arguments"].extend(parameter_rows(options, invocation_id=invocation["invocation_id"]))
         store.data["eval_argv"].extend(dict(invocation_id=invocation["invocation_id"], position=index, token=token)
@@ -446,70 +477,51 @@ class _Runner:
             for name, keys in plan.requirements[artifact.id].items()
         } for artifact in plan.artifacts}
 
-    @staticmethod
-    def _record_selections(store: Store, invocation_id: str, selections: dict) -> None:
-        for artifact_id, scopes in selections.items():
-            for name, ids in scopes.items():
-                store.data["eval_requirements"].append(dict(invocation_id=invocation_id,
-                    artifact_id=artifact_id, requirement=name))
-                store.data["eval_selections"].extend(dict(invocation_id=invocation_id,
-                    artifact_id=artifact_id, requirement=name, position=i, run_id=run_id)
-                    for i, run_id in enumerate(ids))
-        store.save()
-
-    def _render(self, store, invocation, artifacts, selections, options):
+    def _render(self, store, invocation, artifacts, selections, options, argv):
         invocation.update(status="success", finished_at=now(), collection_complete=True)
-        data = report_data(store.data, selections, invocation["invocation_id"])
+        data = report_data(store.data, selections)
+        report = dict(schema_version=1, data=REPORT_DATA, invocation=dict(invocation),
+                      arguments=options, argv=list(argv), selections=selections)
         return render_artifacts(data, artifacts, selections, Path(options["output"]).expanduser(),
-                                source=self.browser_source, title=self.title)
+                                source=self.browser_source, title=self.title, report=report)
 
     def _render_only(self, store: Store, options: dict, argv: Sequence[str]) -> EvaluationResult:
-        """Replay saved selections with matching requirements and data versions.
+        """Replay a report without changing its data or resolving workload refs.
 
-        Reject incompatible declarations before changing files or recording a new
-        invocation. Selectors, Git resolution, and measurement callbacks do not run.
+        Requirements and declared data versions must match the saved selections.
+        Validate before removing outputs. Replay never collects measurements.
         """
+        saved = read_report(self._report_path(options), store.data)
+        if options["only"] is None:
+            options = {**options, "only": list(saved["selections"])}
         artifacts = self._artifacts(options)
-        saved = options["invocation"]
-        if saved is None:
-            candidates = [row for row in store.data["eval_invocations"]
-                          if row["collection_complete"]]
-            if not candidates:
-                raise ValueError("no completed invocation to render")
-            saved = candidates[-1]["invocation_id"]
-        elif not any(row["invocation_id"] == saved for row in store.data["eval_invocations"]):
-            raise ValueError(f"unknown saved invocation: {saved}")
+        browser_callbacks(artifacts, self.browser_source)
         selections = {}
         runs = {row["run_id"]: row for row in store.data["eval_runs"]}
         for artifact in artifacts:
-            rows = [row for row in store.data["eval_selections"]
-                    if row["invocation_id"] == saved and row["artifact_id"] == artifact.id]
-            names = {row["requirement"] for row in store.data["eval_requirements"]
-                     if row["invocation_id"] == saved and row["artifact_id"] == artifact.id}
-            if names != set(artifact.requires):
-                raise ValueError(f"saved invocation is missing requirements for {artifact.id}")
-            selections[artifact.id] = {name: [row["run_id"] for row in sorted(rows, key=lambda r: r["position"])
-                                            if row["requirement"] == name] for name in artifact.requires}
-            for row in rows:
-                run = runs[row["run_id"]]
+            scopes = saved["selections"].get(artifact.id)
+            if scopes is None or set(scopes) != set(artifact.requires):
+                raise ValueError(f"saved report is missing requirements for {artifact.id}")
+            selections[artifact.id] = scopes
+            for run_id in {run_id for ids in scopes.values() for run_id in ids}:
+                run = runs[run_id]
                 benchmark = self.benchmarks.get(run["benchmark"])
                 if benchmark is None or benchmark.version != run["data_version"]:
                     raise ValueError(
                         f"saved data version for {run['benchmark']!r} is {run['data_version']!r}; "
                         "declare the matching version to replay it, or run without --render-only to collect current data"
                     )
-        discard_outputs(Path(options["output"]).expanduser(), self.artifacts)
-        with self._invocation(store, options, argv) as invocation:
-            invocation["source_invocation"] = saved
-            self._record_selections(store, invocation["invocation_id"], selections)
-            written = self._render(store, invocation, artifacts, selections, options)
-            return EvaluationResult(invocation["invocation_id"], store.path, 0,
-                                    len({run_id for scopes in selections.values() for ids in scopes.values() for run_id in ids}), written)
+        invocation = self._invocation_metadata()
+        invocation["source_invocation"] = saved["invocation"]["invocation_id"]
+        discard_outputs(Path(options["output"]).expanduser())
+        written = self._render(store, invocation, artifacts, selections, options, argv)
+        return EvaluationResult(invocation["invocation_id"], store.path, 0,
+                                len({run_id for scopes in selections.values() for ids in scopes.values() for run_id in ids}), written)
 
     def run(self, *, args: Namespace | Mapping | None = None, argv: Sequence[str] | None = None) -> EvaluationResult:
         """Plan, collect, checkpoint, and render the selected paper outputs.
 
-        Default: all artifacts, reusable observations from ``out/results.json``.
+        Default: all artifacts in ``out``, with ``cache.json`` beside that directory.
         ``--dry-run`` returns a plan without writing. ``--render-only`` uses
         saved sample selections without resolving Git or invoking benchmarks.
         Every requested treatment has rows before collection. Errors/timeouts
@@ -517,24 +529,25 @@ class _Runner:
         """
         options = self._options(args)
         # Validate only selected outputs, before collection or changing saved files.
-        browser_callbacks(self._artifacts(options), self.browser_source)
+        if not options["render_only"]:
+            browser_callbacks(self._artifacts(options), self.browser_source)
         tokens = list(sys.argv[1:] if argv is None else argv)
         store = Store(self._data_path(options))
         if options["dry_run"]:
             plan = self._plan(options, store)
             print(plan.describe())
             return EvaluationResult(None, store.path, 0, plan.reused, [], plan)
+        if options["render_only"]:
+            return self._render_only(store, options, tokens)
         with store.writer():
-            if options["render_only"]:
-                return self._render_only(store, options, tokens)
             plan = self._plan(options, store)
             print(plan.describe())
-            discard_outputs(Path(options["output"]).expanduser(), self.artifacts)
+            discard_outputs(Path(options["output"]).expanduser())
             reused = plan.reused
             with self._invocation(store, options, tokens) as invocation:
                 attempts = self._reserve(store, plan, invocation)
                 selections = self._selections(plan)
-                self._record_selections(store, invocation["invocation_id"], selections)
+                store.save()
                 collected = self._collect(store, plan, attempts, jobs=options["jobs"])
-                written = self._render(store, invocation, plan.artifacts, selections, options)
+                written = self._render(store, invocation, plan.artifacts, selections, options, tokens)
                 return EvaluationResult(invocation["invocation_id"], store.path, collected, reused, written, plan)

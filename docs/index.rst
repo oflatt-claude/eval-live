@@ -13,6 +13,7 @@ tables.
    :maxdepth: 2
 
    python-guide
+   cli
    api
    data-format
 

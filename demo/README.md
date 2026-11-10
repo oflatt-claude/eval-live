@@ -14,9 +14,18 @@ the same set configuration before and after an optimization.
 No clone or compiler is needed. The full run requires 27 observations, shared
 across the artifact declarations.
 
+`demo/out/` contains the persistent `cache.json`, the benchmark
+`repository/`, and the generated `paper/` directory. Each run clears all
+files in `paper/`, including files it no longer generates. Subdirectories or
+symlinks cause it to stop before deleting anything. Keep anything you want to
+retain outside `paper/`. The cache and
+benchmark repository survive; validation failures and `--dry-run` leave
+`paper/` unchanged.
+
 | File in `demo/out/paper/` | Contents |
 | --- | --- |
-| `results.json` | All flat measurement tables, CLI arguments, commit/configuration provenance, process diagnostics, and exact artifact sample selections |
+| `results.json` | Cache-format data for every already-collected attempt from the commits used by this report |
+| `reproduce.json` | Output selections, resolved CLI arguments, command line, and evaluation script Git revision |
 | `runtime.pdf` | Current-commit list and set timings |
 | `history.pdf` | The same configuration at two different commits |
 | `summary.tex` | Median timings as a LaTeX table |
@@ -35,16 +44,41 @@ python demo/eval.py --seed 42
 python demo/eval.py --timeout 60
 python demo/eval.py --parallel --jobs 4
 python demo/eval.py --force
-python demo/eval.py --render-only
+python demo/eval.py --render-only --report demo/out/paper/reproduce.json --output figures/replayed
 python demo/eval.py --help
 ```
 
-`--render-only` uses the latest completed collection's exact selections. If
-that invocation only contained a subset, pass the same `--only` selection or
-use `--invocation ID` to choose a complete run. No benchmark repository is
-needed for render-only use. Use `--data PATH` to share a cache across artifact
-output directories. Every option and its default is recorded, even options
-that do not affect measurement identity.
+Use `--data PATH` to share a cache across output directories. Every option and
+its default is recorded, even options that do not affect measurement identity.
+
+To put one figure and its data in a separate folder:
+
+```bash
+python demo/eval.py --only runtime --data demo/out/cache.json --output figures/runtime
+```
+
+The folder contains `runtime.pdf`, `index.html`, `results.json`, and
+`reproduce.json`. Keep both JSON files together. Regenerate it from this bundle:
+
+```bash
+python demo/eval.py --render-only --report figures/runtime/reproduce.json \
+    --output figures/replayed-runtime
+```
+
+Replay uses the current script and its rendering dependencies with the bundled
+data. It requires a different output directory and leaves the bundle unchanged;
+the original cache and workload repository are unnecessary. It does not check
+out code. The data retains its collection commits, and the new report records
+the rendering script's current commit. Use `--only history` when exporting and
+replaying the comparison figure.
+
+To regenerate with new arguments using the current cache, run normally. This
+replaces the figure and bundle in the folder:
+
+```bash
+python demo/eval.py --only runtime --samples 5 --data demo/out/cache.json \
+    --output figures/runtime
+```
 
 The demo defines `--samples` itself and includes a `sample` index in each
 treatment. Both the total CLI count and the individual index affect cache
@@ -89,12 +123,12 @@ The flag and worker count participate in cache identity. Concurrent timing
 measurements share machine resources, so use `--jobs 1` for sequential timings.
 
 Timings are illustrative and vary with machine load. Container construction is
-outside the timed region. Each invocation replaces the generated report;
-files for unselected outputs are removed. Use separate output directories to
-keep several reports. The HTML includes the runs referenced by its outputs;
-`results.json` retains the complete history. The sibling `.lock` file is writer
-coordination, not stored data.
+outside the timed region. Use separate output directories to keep several reports. The HTML embeds `results.json`; figures receive only
+their selected rows. Commit the evaluation code before generating final
+outputs: uncommitted changes in its checkout produce a warning. The sibling
+`.lock` file coordinates writers and contains no evaluation data.
 
+The [CLI reference](../docs/cli.rst) covers replay, regeneration, and shared options.
 The [Python guide](../docs/python-guide.rst) covers callback contracts and the
 [API reference](../docs/api.rst) is generated from docstrings. A second example,
 [egglog_eval.py](egglog_eval.py), builds and runs a real egglog workload when a

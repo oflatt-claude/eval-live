@@ -14,11 +14,11 @@ from typing import Any, Iterator, Mapping
 
 Scalar = str | int | float | bool | None
 Data = dict[str, list[dict[str, Scalar]]]
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SYSTEM_TABLES = (
     "eval_metadata", "eval_invocations", "eval_argv", "eval_arguments",
     "eval_configs", "eval_environments", "eval_runs",
-    "eval_selections", "eval_requirements", "eval_processes", "eval_commands",
+    "eval_processes", "eval_commands",
 )
 
 
@@ -210,8 +210,6 @@ class Store:
                 raise ValueError("invalid invocation status")
             if type(row["collection_complete"]) is not bool:
                 raise ValueError("invalid collection status")
-            if "source_invocation" in row and row["source_invocation"] not in invocations:
-                raise ValueError("rendering invocation refers to a missing source")
         parameter_tables = (("eval_arguments", "invocation_id"), ("eval_configs", "config_id"),
                             ("eval_environments", "environment_id"))
         for table, key in parameter_tables:
@@ -265,25 +263,11 @@ class Store:
                                     config_id=row["config_id"], environment_id=row["environment_id"])
             if row["cache_key"] != digest(identity):
                 raise ValueError("cache identity does not match run provenance")
-        requirement_keys = ("invocation_id", "artifact_id", "requirement")
-        requirements = [tuple(row[key] for key in requirement_keys) for row in self.data["eval_requirements"]]
-        if len(set(requirements)) != len(requirements) or any(
-            not isinstance(value, str) or not value for key in requirements for value in key
-        ):
-            raise ValueError("invalid or duplicate output requirement")
-        requirements = set(requirements)
-        for row in self.data["eval_selections"]:
-            if tuple(row[key] for key in requirement_keys) not in requirements:
-                raise ValueError("selection has no output requirement")
-            for key in ("artifact_id", "requirement"):
-                if not isinstance(row[key], str) or not row[key]:
-                    raise ValueError("invalid artifact selection")
         for row in self.data["eval_commands"]:
             if row["process_id"] not in processes:
                 raise ValueError("command has no process")
         for table, keys, position in (("eval_argv", ("invocation_id",), "position"),
-                                      ("eval_commands", ("process_id",), "position"),
-                                      ("eval_selections", ("invocation_id", "artifact_id", "requirement"), "position")):
+                                      ("eval_commands", ("process_id",), "position")):
             groups = {}
             for row in self.data[table]:
                 groups.setdefault(tuple(row[key] for key in keys), []).append(row[position])
