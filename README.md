@@ -3,8 +3,9 @@
 eval-live is an opinionated way to run paper evaluations. A paper evaluation
 should be a single Python script that generates all the figures, LaTeX macros,
 tables, and other artifacts the paper needs. With no arguments, that script
-runs the entire evaluation. Command-line arguments change parameters or select
-subsets of the work.
+runs the entire evaluation and opens the report in your browser. Use
+`--no-browser` for automated runs. Command-line arguments change parameters or
+select subsets of the work.
 
 All command-line arguments, including their defaults, belong with the data so
 that results can be reproduced. All evaluation data should be stored as flat
@@ -110,9 +111,10 @@ Only measurement data is cached. Before collection or rendering starts,
 eval-live clears **all files in the output directory**, including hidden and
 unrecognized files. It stops before deleting anything if it finds a subdirectory
 or symlink. Keep source files and caches outside it. The default
-cache is `cache.json` beside the output directory; the demo's workload repository
-is also outside `paper/`, in `demo/out/repository/`. Validation failures and
-`--dry-run` leave existing outputs untouched.
+cache is `cache.json` beside the script's declared default output directory;
+overriding `--output` does not move it. Use `--cache` to choose another cache.
+The demo's workload repository is outside `paper/`, in `demo/out/repository/`.
+Validation failures and `--dry-run` leave existing outputs untouched.
 
 Figures, tables, macros, and the webpage are regenerated on each run. Browser
 filter changes recompute the report and publish its tables and graphs together.
@@ -138,7 +140,7 @@ generating final paper outputs.
 Export just one figure and its data to a folder:
 
 ```bash
-python demo/eval.py --only runtime --data demo/out/cache.json --output figures/runtime
+python demo/eval.py --only runtime --output figures/runtime
 ```
 
 This writes `runtime.pdf`, `index.html`, `results.json`, and `reproduce.json`.
@@ -147,7 +149,7 @@ and its rendering dependencies, without the original cache or workload
 repository:
 
 ```bash
-python demo/eval.py --render-only --report figures/runtime/reproduce.json \
+python demo/eval.py --replay figures/runtime \
     --output figures/replayed-runtime
 ```
 
@@ -160,7 +162,7 @@ To regenerate with new arguments and your current measurement cache instead,
 run normally. This replaces the figure and its report bundle in that folder:
 
 ```bash
-python demo/eval.py --only runtime --samples 5 --data demo/out/cache.json \
+python demo/eval.py --only runtime --samples 5 \
     --output figures/runtime
 ```
 

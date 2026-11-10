@@ -188,7 +188,7 @@ class Store:
         meta = self.data.get("eval_metadata", [])
         if len(meta) != 1 or type(meta[0].get("schema_version")) is not int or meta[0]["schema_version"] != SCHEMA_VERSION:
             raise ValueError(f"unsupported schema version; expected {SCHEMA_VERSION}. "
-                             "Use a new --data path, or the original eval-live version to read this file")
+                             "Use a new --cache path, or the original eval-live version to read this file")
         if set(SYSTEM_TABLES) - self.data.keys():
             raise ValueError("missing metadata tables")
         if any(name.startswith("eval_") and name not in SYSTEM_TABLES for name in self.data):

@@ -111,19 +111,20 @@ def main(argv=None):
 
     parser = eval_live.add_arguments(argparse.ArgumentParser(description=__doc__),
                                      output=Path(__file__).resolve().parent / "out" / "paper")
-    parser.add_argument("--sizes", nargs="+", type=int, default=[500, 2000, 8000])
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--baseline", default="HEAD~1", help="baseline commit for the history figure")
-    parser.add_argument("--repository", type=Path, default=Path(__file__).resolve().parent / "out" / "repository")
-    parser.add_argument("--samples", type=int, default=3, help="repetitions per configuration")
-    parser.add_argument("--parallel", action="store_true", help="allow concurrent treatments, limited by --jobs")
+    measurements = parser.add_argument_group('Membership parameters (normal runs only)')
+    measurements.add_argument("--sizes", nargs="+", type=int, default=[500, 2000, 8000])
+    measurements.add_argument("--seed", type=int, default=0)
+    measurements.add_argument("--baseline", default="HEAD~1", help="baseline commit for the history figure")
+    measurements.add_argument("--repository", type=Path, default=Path(__file__).resolve().parent / "out" / "repository")
+    measurements.add_argument("--samples", type=int, default=3, help="repetitions per configuration")
+    measurements.add_argument("--parallel", action="store_true", help="allow concurrent treatments, limited by --jobs")
     tokens = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(tokens)
     if args.samples < 1:
         parser.error("--samples must be positive")
     if any(size <= 0 for size in args.sizes) or len(set(args.sizes)) != len(args.sizes):
         parser.error("--sizes must contain distinct positive integers")
-    if not args.render_only:
+    if not args.replay:
         if args.dry_run and not (args.repository / ".git").exists():
             parser.error("run the demo once to create its workload repository before using --dry-run")
         if not args.dry_run:
@@ -146,13 +147,10 @@ def main(argv=None):
 
     reg.graph("Commit comparison", history, id="history", requires=comparison_treatments)
     try:
-        result = reg.run(args=args, argv=tokens)
+        reg.run(args=args, argv=tokens)
     except (ValueError, RuntimeError) as error:
         print(error, file=sys.stderr)
         return 1
-    print(f"Collected {result.collected}; reused {result.reused}. Data: {result.data_path}")
-    if result.written:
-        print(f"Report: {(args.output / 'index.html').resolve().as_uri()}")
     return 0
 
 

@@ -14,10 +14,11 @@ import sys
 import time
 from typing import Mapping, Sequence
 import uuid
+import webbrowser
 
 from .eval_live import Registry, _Output
 from .benchmarks import Benchmark, ProcessError, RunContext
-from .cli import CONTROL_ARGUMENTS
+from .cli import CONTROL_ARGUMENTS, validate_replay
 from .render import (REPORT, REPORT_DATA, browser_callbacks, discard_outputs, read_report,
                      render_artifacts, report_data, source_paths, validate_output)
 from .store import Store, digest, parameter_rows, parameters, readonly_parameters, run_identity
@@ -132,10 +133,11 @@ class Plan:
     def reused(self) -> int:
         return sum(run.selected is not None for run in self.runs.values())
 
-    def describe(self) -> str:
-        """Explain required runs, cache hits, and the artifacts needing them."""
-        lines = [f"{len(self.artifacts)} artifacts; {self.reused} cached treatments; {self.missing} missing treatments"]
-        for run in self.runs.values():
+    def describe(self, *, detailed: bool = True) -> str:
+        """List selected outputs and counts; include individual treatments if detailed."""
+        lines = [f"Outputs: {', '.join(artifact.id for artifact in self.artifacts)}",
+                 f"Treatments: {self.missing} to collect; {self.reused} to reuse."]
+        for run in self.runs.values() if detailed else ():
             deadline = "none" if run.benchmark.timeout is None else f"{run.benchmark.timeout:g}s"
             lines.append(f"  {run.benchmark.name}@{run.target.commit[:12]} {run.config!r}: "
                          f"{'cached' if run.selected is not None else 'missing'}; timeout {deadline}; "
@@ -173,10 +175,15 @@ class _Runner:
         self.title = registry.title
 
     @staticmethod
-    def _options(args: Namespace | Mapping | None) -> dict:
+    def _options(args: Namespace | Mapping | None, argv: Sequence[str] = ()) -> dict:
         supplied = vars(args) if isinstance(args, Namespace) else dict(args or {})
-        options = dict(output="out", data=None, only=None, benchmarks=None, force=False,
-                       dry_run=False, render_only=False, report=None, timeout=None,
+        removed = supplied.keys() & {"data", "render_only", "report", "benchmarks", "invocation"}
+        if removed:
+            raise ValueError(f"unsupported options: {', '.join(sorted(removed))}; use cache or replay")
+        if supplied.get("replay"):
+            validate_replay(args, argv)
+        options = dict(output="out", cache="cache.json", only=None, force=False,
+                       dry_run=False, replay=None, timeout=None, no_browser=False,
                        commit="HEAD", jobs=os.cpu_count() or 1)
         options.update(parameters(supplied))
         if type(options["jobs"]) is not int or options["jobs"] < 1:
@@ -184,12 +191,6 @@ class _Runner:
         timeout = options["timeout"]
         if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("timeout must be a finite positive number of seconds")
-        if options["render_only"] and (options["force"] or options["dry_run"]):
-            raise ValueError("--render-only cannot be combined with --force or --dry-run")
-        if "invocation" in supplied:
-            raise ValueError("use --report PATH to replay a saved report")
-        if options["report"] and not options["render_only"]:
-            raise ValueError("--report requires --render-only")
         return options
 
     def _artifacts(self, options: dict) -> list[_Output]:
@@ -201,33 +202,20 @@ class _Runner:
         by_id = {artifact.id: artifact for artifact in self.artifacts}
         unknown = set(names) - by_id.keys()
         if unknown:
-            raise ValueError(f"unknown artifacts: {sorted(unknown)}")
+            raise ValueError(f"unknown output IDs: {', '.join(sorted(unknown))}; available: {', '.join(by_id)}")
         return [by_id[name] for name in names]
 
-    @staticmethod
-    def _report_path(options: dict) -> Path:
-        if options["report"]:
-            return Path(options["report"]).expanduser().resolve()
-        if options["data"]:
-            return Path(options["data"]).expanduser().resolve().with_name(REPORT)
-        raise ValueError("--render-only requires --report PATH (or --data PATH/results.json)")
-
     def _data_path(self, options: dict) -> Path:
-        if options["render_only"]:
-            path = self._report_path(options).with_name(REPORT_DATA)
-            if options["data"] and Path(options["data"]).expanduser().resolve() != path:
-                raise ValueError("replay uses only the report's sibling results.json; "
-                                 "omit --data, or run without --render-only to use a measurement cache")
+        if options["replay"]:
+            path = Path(options["replay"]).expanduser().resolve() / REPORT_DATA
             if not path.is_file():
                 raise ValueError(f"missing report data: {path}")
+            protected = [path, path.with_name(REPORT)]
         else:
-            path = Path(options["data"] or Path(options["output"]).expanduser().parent / "cache.json").expanduser().resolve()
+            path = Path(options["cache"]).expanduser().resolve()
+            protected = [path]
         if path.suffix.lower() != ".json":
-            raise ValueError("the data/cache file must have a .json extension")
-        protected = [path]
-        protected.extend(Path(options[name]) for name in ("data", "report") if options[name])
-        if options["render_only"]:
-            protected.append(self._report_path(options))
+            raise ValueError("the cache file must have a .json extension")
         if isinstance(self.browser_source, Path):
             protected.append(self.browser_source)
         callbacks = [fn for item in self.artifacts for fn in (item.render, item.interactive_filter)]
@@ -238,6 +226,8 @@ class _Runner:
     def plan(self, *, args: Namespace | Mapping | None = None) -> Plan:
         """Resolve requirements and inspect the cache without builds or writes."""
         options = self._options(args)
+        if options["replay"]:
+            raise ValueError("replay uses saved selections; run without --replay to plan collection")
         return self._plan(options, Store(self._data_path(options)))
 
     def _catalog(self) -> dict[str, Mapping]:
@@ -280,9 +270,6 @@ class _Runner:
         artifacts = self._artifacts(options)
         measurement_args = {key: value for key, value in options.items()
                             if key not in CONTROL_ARGUMENTS and key not in self.selection_arguments}
-        allowed = options["benchmarks"]
-        if allowed is not None and (not isinstance(allowed, list) or set(allowed) - self.benchmarks.keys()):
-            raise ValueError("--benchmarks contains unknown benchmark names")
         plan = Plan(artifacts, {}, {})
         catalog = self._catalog()
         targets = {}
@@ -292,8 +279,6 @@ class _Runner:
                 requirements = []
                 for treatment in self._choose(selector, catalog, f"{artifact.id}/{name}", options["commit"]):
                     benchmark_name = treatment["benchmark"]
-                    if allowed is not None and benchmark_name not in allowed:
-                        raise ValueError(f"benchmark subset excludes {benchmark_name!r}, required by {artifact.id}")
                     benchmark = self.benchmarks[benchmark_name]
                     if options["timeout"] is not None:
                         benchmark = replace(benchmark, timeout=options["timeout"])
@@ -485,13 +470,13 @@ class _Runner:
         return render_artifacts(data, artifacts, selections, Path(options["output"]).expanduser(),
                                 source=self.browser_source, title=self.title, report=report)
 
-    def _render_only(self, store: Store, options: dict, argv: Sequence[str]) -> EvaluationResult:
+    def _replay(self, store: Store, options: dict, argv: Sequence[str]) -> EvaluationResult:
         """Replay a report without changing its data or resolving workload refs.
 
         Requirements and declared data versions must match the saved selections.
         Validate before removing outputs. Replay never collects measurements.
         """
-        saved = read_report(self._report_path(options), store.data)
+        saved = read_report(Path(options["replay"]).expanduser().resolve() / REPORT, store.data)
         if options["only"] is None:
             options = {**options, "only": list(saved["selections"])}
         artifacts = self._artifacts(options)
@@ -509,39 +494,69 @@ class _Runner:
                 if benchmark is None or benchmark.version != run["data_version"]:
                     raise ValueError(
                         f"saved data version for {run['benchmark']!r} is {run['data_version']!r}; "
-                        "declare the matching version to replay it, or run without --render-only to collect current data"
+                        "declare the matching version to replay it, or run without --replay to collect current data"
                     )
         invocation = self._invocation_metadata()
         invocation["source_invocation"] = saved["invocation"]["invocation_id"]
+        reused = len({run_id for scopes in selections.values() for ids in scopes.values() for run_id in ids})
+        print(f"Outputs: {', '.join(artifact.id for artifact in artifacts)}")
+        self._destinations(store, options)
         discard_outputs(Path(options["output"]).expanduser())
         written = self._render(store, invocation, artifacts, selections, options, argv)
-        return EvaluationResult(invocation["invocation_id"], store.path, 0,
-                                len({run_id for scopes in selections.values() for ids in scopes.values() for run_id in ids}), written)
+        return EvaluationResult(invocation["invocation_id"], store.path, 0, reused, written)
+
+    @staticmethod
+    def _destinations(store: Store, options: dict) -> None:
+        print(f"{'Replay data' if options['replay'] else 'Cache'}: {store.path}")
+        action = "dry run; unchanged" if options["dry_run"] else "all files will be cleared"
+        print(f"Output: {Path(options['output']).expanduser().resolve()} ({action})")
 
     def run(self, *, args: Namespace | Mapping | None = None, argv: Sequence[str] | None = None) -> EvaluationResult:
         """Plan, collect, checkpoint, and render the selected paper outputs.
 
-        Default: all artifacts in ``out``, with ``cache.json`` beside that directory.
-        ``--dry-run`` returns a plan without writing. ``--render-only`` uses
+        Default: all artifacts in ``out``, with measurements in ``cache.json``.
+        ``--dry-run`` returns a plan without writing. ``--replay`` uses
         saved sample selections without resolving Git or invoking benchmarks.
         Every requested treatment has rows before collection. Errors/timeouts
         use explicit error rows; renderers decide whether to report messages.
+        Open the completed HTML report unless ``--no-browser`` is set. Browser
+        availability does not affect the saved evaluation's success.
         """
-        options = self._options(args)
-        # Validate only selected outputs, before collection or changing saved files.
-        if not options["render_only"]:
-            browser_callbacks(self._artifacts(options), self.browser_source)
         tokens = list(sys.argv[1:] if argv is None else argv)
+        options = self._options(args, tokens)
+        result = self._execute(options, tokens)
+        if not options["dry_run"]:
+            print(f"Collected {result.collected}; reused {result.reused}.")
+        report = next((path for path in result.written if path.name == "index.html"), None)
+        if report is not None:
+            print(f"Report: {report.resolve().as_uri()}")
+        if report is not None and not options["no_browser"]:
+            url = report.resolve().as_uri()
+            try:
+                opened = webbrowser.open(url)
+            except (webbrowser.Error, OSError):
+                opened = False
+            if not opened:
+                print(f"Could not open a browser. Open the saved report: {url}", file=sys.stderr)
+        return result
+
+    def _execute(self, options: dict, tokens: Sequence[str]) -> EvaluationResult:
+        """Complete file publication and release the cache lock before returning."""
+        # Validate only selected outputs, before collection or changing saved files.
+        if not options["replay"]:
+            browser_callbacks(self._artifacts(options), self.browser_source)
         store = Store(self._data_path(options))
         if options["dry_run"]:
             plan = self._plan(options, store)
             print(plan.describe())
+            self._destinations(store, options)
             return EvaluationResult(None, store.path, 0, plan.reused, [], plan)
-        if options["render_only"]:
-            return self._render_only(store, options, tokens)
+        if options["replay"]:
+            return self._replay(store, options, tokens)
         with store.writer():
             plan = self._plan(options, store)
-            print(plan.describe())
+            print(plan.describe(detailed=False))
+            self._destinations(store, options)
             discard_outputs(Path(options["output"]).expanduser())
             reused = plan.reused
             with self._invocation(store, options, tokens) as invocation:

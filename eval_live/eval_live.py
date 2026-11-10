@@ -385,12 +385,22 @@ class Registry:
         ``--only ID --output DIR`` exports one output and its data. Replay an
         export into a different directory to preserve the source bundle.
 
+        A successful run or replay opens the HTML report in the default browser
+        unless ``--no-browser`` is set. Browser failures print the report's
+        location without failing the evaluation.
+
         ``--timeout`` overrides command deadlines; raising it preserves
         successful samples and recollects timed-out work. ``--dry-run`` inspects
-        the plan; ``--render-only --report PATH`` replays saved selections without
+        the plan; ``--replay FOLDER`` replays saved selections without
         collecting or modifying the bundled input data. The normal cache is
         never read during replay. The current rendering code runs without a
         checkout, and its revision is recorded separately from collection commits.
+
+        Pass the parsed ``argparse.Namespace`` as ``args`` and the original
+        command-line tokens as ``argv`` (default: ``sys.argv[1:]``). Replay
+        rejects explicit collection flags. For Python calls, ``args`` may be
+        a mapping; a replay mapping accepts only ``replay``, ``output``,
+        ``only``, and ``no_browser``.
 
         Every requested treatment has measured or explicit error rows. Ctrl+C
         stops collection and rendering. Figure warnings/errors are computed,
@@ -399,9 +409,10 @@ class Registry:
         All files in the output directory are cleared before collection or
         rendering, including unrecognized files. Subdirectories or symlinks
         cause an error before any deletion. Keep inputs outside the directory.
-        The default cache is ``cache.json`` beside that directory. Validation
-        failures and ``--dry-run`` leave outputs untouched. New files are
-        published only after successful rendering; errors or Ctrl+C preserve
+        With no arguments, outputs go to ``out`` and the cache to ``cache.json``.
+        ``add_arguments`` supplies script defaults; ``--output`` never moves
+        the cache. Validation failures and ``--dry-run`` leave outputs untouched.
+        New files are published only after successful rendering; errors or Ctrl+C preserve
         cached data. Use separate output directories to retain reports or run
         concurrent invocations.
         """

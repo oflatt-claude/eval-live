@@ -12,7 +12,8 @@ macros. It creates a tiny local Git repository with two commits and runs all
 four paper outputs. It compares list/set membership across input sizes and
 the same set configuration before and after an optimization.
 No clone or compiler is needed. The full run requires 27 observations, shared
-across the artifact declarations.
+across the artifact declarations. After saving the outputs, it opens the HTML
+report in your browser. Use `--no-browser` to save without opening it.
 
 `demo/out/` contains the persistent `cache.json`, the benchmark
 `repository/`, and the generated `paper/` directory. Each run clears all
@@ -44,24 +45,25 @@ python demo/eval.py --seed 42
 python demo/eval.py --timeout 60
 python demo/eval.py --parallel --jobs 4
 python demo/eval.py --force
-python demo/eval.py --render-only --report demo/out/paper/reproduce.json --output figures/replayed
+python demo/eval.py --replay demo/out/paper --output figures/replayed
 python demo/eval.py --help
 ```
 
-Use `--data PATH` to share a cache across output directories. Every option and
-its default is recorded, even options that do not affect measurement identity.
+Changing `--output` keeps using `demo/out/cache.json`. Use `--cache PATH` to
+choose another cache. Every option and its default is recorded, even options
+that do not affect measurement identity.
 
 To put one figure and its data in a separate folder:
 
 ```bash
-python demo/eval.py --only runtime --data demo/out/cache.json --output figures/runtime
+python demo/eval.py --only runtime --output figures/runtime
 ```
 
 The folder contains `runtime.pdf`, `index.html`, `results.json`, and
 `reproduce.json`. Keep both JSON files together. Regenerate it from this bundle:
 
 ```bash
-python demo/eval.py --render-only --report figures/runtime/reproduce.json \
+python demo/eval.py --replay figures/runtime \
     --output figures/replayed-runtime
 ```
 
@@ -76,7 +78,7 @@ To regenerate with new arguments using the current cache, run normally. This
 replaces the figure and bundle in the folder:
 
 ```bash
-python demo/eval.py --only runtime --samples 5 --data demo/out/cache.json \
+python demo/eval.py --only runtime --samples 5 \
     --output figures/runtime
 ```
 
