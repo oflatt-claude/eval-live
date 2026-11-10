@@ -366,11 +366,36 @@ again on every input change; the Python runtime remains loaded.
 Run the Python and JavaScript tests:
 
 ```bash
+pip install -e '.[render,docs,test]'
 node test/state.test.mjs   # state core: filtering, reducers, typed selections
 node test/dom.test.mjs      # initEvalLive end-to-end: filter / collapse / checkbox / clear
 node test/graph-engine.test.mjs  # Pyodide conversion boundary: graphs / tables / narrowing
 python -m unittest discover -s test -p 'test_*.py'
 ```
+
+The Python suite includes [Hypothesis](https://hypothesis.readthedocs.io/)
+properties for typed parameter round-trips, timeout reuse, treatment selection,
+exports containing every attempt for referenced commits, and exact figure
+selections. A stateful test compares
+saves, failed writes, unsaved edits, and reloads against a model of committed
+rows. The existing integration tests cover real subprocesses, worktrees,
+interruptions, and report publication.
+
+Local property runs generate fresh examples; CI uses the reproducible `ci`
+profile. For a larger randomized run, use the `stress` profile locally or choose
+it when manually running the Checks workflow in GitHub Actions:
+
+```bash
+HYPOTHESIS_PROFILE=stress python -m unittest discover -s test -p 'test_properties.py'
+```
+
+The default profiles try up to 100 examples per property, and `stress` tries
+1,000. The stateful test uses one quarter as many sequences, with up to 25 steps
+each. Failures print a minimized example and a temporary `@reproduce_failure`
+decorator. See [replaying failures](https://hypothesis.readthedocs.io/en/latest/tutorial/replaying-failures.html)
+for reproducing one with the same Hypothesis version. Keep discovered regressions
+as explicit `@example` inputs or ordinary tests; the local `.hypothesis` database
+is a development aid and is ignored by Git.
 
 The JavaScript tests run the browser modules in a `node:vm` context with a small
 DOM shim; no npm packages are needed. The AlaSQL row-evaluation path and the
