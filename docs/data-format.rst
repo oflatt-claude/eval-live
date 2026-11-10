@@ -43,7 +43,7 @@ Rows and outcomes
 
 ``run_id`` links measurement rows to a treatment's configuration and commit.
 Repeated or forced evaluations retain earlier attempts. The cache contains no
-per-output selections; those belong to the generated ``report.json``.
+per-output selections; those belong to the generated ``reproduce.json``.
 
 Every requested treatment has rows in every table declared by ``error_rows``
 before collection begins. This invariant applies to every attempt.
@@ -63,7 +63,7 @@ cache reuse when the deadline changes.
 
 ``eval_invocations.collection_complete`` records that all requested treatments
 finished, including those represented by timeout or failure rows. Rendering
-may still report errors. Render-only invocations are recorded in ``report.json``
+may still report errors. Render-only invocations are recorded in ``reproduce.json``
 and do not modify the measurement cache.
 
 Computed warning/error tables are rendering outputs and are never added to
@@ -83,14 +83,15 @@ so another clone has a separate collection identity. Report selections remain
 portable for render-only use.
 
 Writes are atomic: readers see the complete previous or new snapshot. One
-writer holds ``results.json.lock``; concurrent writers fail immediately. The
-lock file can remain after exit, but the lock is released when the writer
-stops. Benchmark results are stored only in the JSON file.
+writer holds a lock beside the cache file (``cache.json.lock`` by default);
+concurrent writers fail immediately. The lock is released when the writer
+stops, although the lock file may remain. Benchmark results are stored only
+in the JSON file.
 
 Report bundle
 -------------
 
-``report-data.json`` uses the cache schema above and is accepted by ``Store``
+``results.json`` uses the cache schema above and is accepted by ``Store``
 and ``--data``. It contains every cached attempt for the repository/commit pairs
 referenced by the report, including other configurations, treatments, data
 versions, environments, failures, and forced attempts. Associated measurement
@@ -98,7 +99,7 @@ rows, command diagnostics, and collection provenance are included. Empty tables
 retain their names. Other commits are omitted, and exporting collects no extra
 data. The HTML embeds the same tables.
 
-``report.json`` is a separate generation record, not a flat measurement table:
+``reproduce.json`` is a separate generation record, not a flat measurement table:
 
 .. list-table::
    :header-rows: 1
@@ -109,7 +110,7 @@ data. The HTML embeds the same tables.
    * - ``schema_version``
      - Report format version, currently 1.
    * - ``data``
-     - Sibling data filename, ``report-data.json``.
+     - Sibling data filename, ``results.json``.
    * - ``invocation``
      - Generation ID, timestamps, script path, script Git commit and dirty
        state, Python/platform, cwd, and status. A replay also records its
@@ -127,20 +128,27 @@ for the same configuration. They are also used in the interactive HTML.
 Callbacks receive temporary ``eval_requirements`` and ``eval_selections`` tables
 for :func:`eval_live.select`; these are not persistent cache tables.
 
-``eval_invocations.script_commit`` identifies the code that collected the data;
-``eval_runs.commit`` identifies workload sources. The separate
-``report.json`` → ``invocation.script_commit`` identifies the code that rendered
-the figures. Replay retains the collection commits and records the current
+Commit fields identify three separate inputs:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Field
+     - Identifies
+   * - ``results.json`` → ``eval_runs.commit``
+     - Workload sources.
+   * - ``results.json`` → ``eval_invocations.script_commit``
+     - The script that collected the data.
+   * - ``reproduce.json`` → ``invocation.script_commit``
+     - The script that rendered the figures.
+
+Replay preserves the data's collection commits and records the current
 rendering commit. ``script_dirty`` is true if the script's repository
 has tracked or untracked changes. A dirty checkout produces a CLI warning. If
 the script is outside Git, its revision and dirty state are null. No standalone
 copy of the script is exported. The HTML still embeds Python rendering callbacks
 for interactive use.
 
-Keep both JSON files with the paper outputs. ``--render-only --report PATH``
-reads only the sibling data file. ``--data PATH/report-data.json`` is an
-alternative spelling that finds ``report.json`` alongside it; a normal cache
-cannot override the bundle. Replay leaves both inputs unchanged, requires a
-different output directory, and uses the current rendering code and dependencies
-without checking out any revision. See :doc:`python-guide` for commands and
-constraints.
+Keep both JSON files with the paper outputs. The :doc:`cli` describes replay
+inputs, output paths, and validation errors.

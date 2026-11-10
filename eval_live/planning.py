@@ -209,27 +209,32 @@ class _Runner:
             return Path(options["report"]).expanduser().resolve()
         if options["data"]:
             return Path(options["data"]).expanduser().resolve().with_name(REPORT)
-        raise ValueError("--render-only requires --report PATH (or --data PATH/report-data.json)")
+        raise ValueError("--render-only requires --report PATH (or --data PATH/results.json)")
 
     @classmethod
     def _data_path(cls, options: dict) -> Path:
         if options["render_only"]:
             path = cls._report_path(options).with_name(REPORT_DATA)
             if options["data"] and Path(options["data"]).expanduser().resolve() != path:
-                raise ValueError("replay uses only the report's sibling report-data.json; "
+                raise ValueError("replay uses only the report's sibling results.json; "
                                  "omit --data, or run without --render-only to use a measurement cache")
             if not path.is_file():
                 raise ValueError(f"missing report data: {path}")
         else:
-            path = Path(options["data"] or Path(options["output"]) / "results.json").expanduser().resolve()
+            path = Path(options["data"] or Path(options["output"]) / "cache.json").expanduser().resolve()
         if path.suffix.lower() != ".json":
             raise ValueError("the data/cache file must have a .json extension")
         output = Path(options["output"]).expanduser().resolve()
         if path in ((output / REPORT_DATA).resolve(), (output / REPORT).resolve()):
-            raise ValueError("report-data.json and report.json in the output directory are reserved for the exported subset; "
+            raise ValueError("results.json and reproduce.json in the output directory are reserved for the exported subset; "
                              "choose a different --output directory or --data path")
         if options["render_only"] and cls._report_path(options).parent == output:
             raise ValueError("replay needs a different --output directory to preserve the source report")
+        manifest = output / ".eval-live-outputs"
+        generated = manifest.read_text().splitlines() if manifest.exists() else []
+        if (output / REPORT_DATA).exists() and not (output / REPORT).exists() and REPORT_DATA not in generated:
+            raise ValueError("existing results.json is not a report bundle; move it to cache.json, "
+                             "or use it with --data and choose a different --output directory")
         return path
 
     def plan(self, *, args: Namespace | Mapping | None = None) -> Plan:
@@ -518,7 +523,7 @@ class _Runner:
     def run(self, *, args: Namespace | Mapping | None = None, argv: Sequence[str] | None = None) -> EvaluationResult:
         """Plan, collect, checkpoint, and render the selected paper outputs.
 
-        Default: all artifacts, reusable observations from ``out/results.json``.
+        Default: all artifacts, reusable observations from ``out/cache.json``.
         ``--dry-run`` returns a plan without writing. ``--render-only`` uses
         saved sample selections without resolving Git or invoking benchmarks.
         Every requested treatment has rows before collection. Errors/timeouts

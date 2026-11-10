@@ -379,7 +379,7 @@ class Registry:
 
         Save all CLI arguments/defaults and data as flat tables in one JSON
         cache. Export all cached attempts from the selected commits to
-        ``report-data.json`` in the same format. ``report.json`` records exact
+        ``results.json`` in the same format. ``reproduce.json`` records exact
         output selections, arguments, and the script's Git revision. Uncommitted
         changes in the script's checkout produce a warning.
         ``--only ID --output DIR`` exports one output and its data. Replay an

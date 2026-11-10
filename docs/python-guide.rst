@@ -13,13 +13,15 @@ tables, and macros. ``demo/eval.py`` is a complete single-script example:
    python demo/eval.py --only summary --sizes 500
    python demo/eval.py --samples 5             # a new CLI configuration
    python demo/eval.py --timeout 60            # opt into a 60-second command limit
-   python demo/eval.py --render-only --report demo/out/paper/report.json --output figures/replayed
+   python demo/eval.py --render-only --report demo/out/paper/reproduce.json \
+       --output figures/replayed
 
 The demo creates a tiny local Git repository with two commits. No clone or
-compiler is needed. It writes one ``demo/out/paper/results.json`` data/cache
+compiler is needed. It writes one ``demo/out/paper/cache.json`` data/cache
 file plus ``runtime.pdf``, ``history.pdf``, ``summary.tex``, ``macros.tex``, and
-``index.html``. A ``report.json`` generation record and ``report-data.json``
-export accompany the outputs. The sibling lock file is writer coordination, not stored data.
+``index.html``. A ``reproduce.json`` generation record and ``results.json``
+export accompany the outputs. The sibling lock file coordinates writers and
+contains no evaluation data.
 A first-ever dry-run requires creating the workload repository by running the demo.
 
 Declare treatments and a collection callback
@@ -362,22 +364,17 @@ recomputes messages, so changing figure policy needs no new measurements.
 Replay
 ------
 
-``--render-only --report PATH`` reads that report and its sibling
-``report-data.json``. Alternatively, ``--render-only --data PATH/report-data.json``
-finds ``report.json`` alongside the data. Replay requires one of these inputs
-and never reads the normal measurement cache. It renders the outputs listed
-in that report; ``--only`` can narrow them further. Exact saved run selections,
-including empty requirements, are used without evaluating selectors, resolving
-workload Git refs, or collecting measurements. Several bundled commits are
-unambiguous because each requirement records its run IDs.
+Replay uses the current rendering script with the data and exact run selections
+saved beside the figures. It requires no workload repository, does not check
+out code, and never reads the normal measurement cache. Multiple commits and
+attempts in the exported data are unambiguous because each output records its
+selected run IDs. Empty requirements remain empty.
 
-Replay uses the current rendering script and dependencies without checking out
-any code. Data collection commits remain unchanged; the new report records the
-script commit used to render its figures. Requirement names and declared
-benchmark versions must match the saved selections. A mismatch fails before
-changing outputs. Changes to selector functions do not change replay selections;
-run normally with ``--data`` to apply new requirements. That uses normal cache
-identity and may collect missing data.
+Requirement names and declared benchmark versions must match the saved
+selections. A mismatch fails before changing outputs. Selectors are not called
+during replay: to change the requirements or measurement arguments, run normally
+with ``--data``. This applies the usual cache identity and may collect missing
+measurements. The :doc:`cli` describes both modes and their options.
 
 Only measurement data is cached. Each run regenerates figures, tables, macros,
 and HTML, replacing the previous generated report in its output directory.
@@ -399,57 +396,40 @@ Combine ``--only`` with ``--output`` to generate a folder for one figure. Point
 
 .. code-block:: bash
 
-   python demo/eval.py --only runtime --data demo/out/paper/results.json --output figures/runtime
+   python demo/eval.py --only runtime --data demo/out/paper/cache.json --output figures/runtime
 
-Only the selected figure's requirements are collected. The folder contains
-``runtime.pdf``, ``index.html``, ``report-data.json``, and ``report.json``.
-The data file uses the normal cache schema and includes **all already-collected
-data from each referenced repository/commit pair**: other treatments,
-configurations, versions, and historical attempts are included. This provides
-more data for future figure changes without collecting extra measurements.
-Other commits remain in the full cache. Comparisons export all referenced commits.
+The folder contains ``runtime.pdf``, ``index.html``, ``results.json``, and
+``reproduce.json``. Only the figure's required measurements are collected, but
+``results.json`` includes all already-collected attempts for its repository/commit
+pairs. Other configurations and historical attempts are available for future
+figure changes; commits not used by the report are omitted.
 
-``report.json`` records the output IDs and exact selected runs, all resolved
-arguments and defaults, the original command-line tokens, and the script's Git
-revision. These selections keep the extra exported rows out of the figure's
-input. The cache itself has no figure selections. See :doc:`data-format` for
-both file formats.
+``reproduce.json`` records the exact selections, CLI arguments, and rendering
+revision. The figure receives only those selected rows. See :doc:`data-format`
+for the two file schemas.
 
-Keep the two JSON files together. To regenerate from a copied bundle with the
-evaluation script and its rendering dependencies:
+Keep both JSON files together. Replay them with the current evaluation script
+and its rendering dependencies, writing to a different output directory:
 
 .. code-block:: bash
 
-   python demo/eval.py --render-only --report figures/runtime/report.json --output figures/replayed-runtime
+   python demo/eval.py --render-only --report figures/runtime/reproduce.json \
+       --output figures/replayed-runtime
 
-The original cache and workload repository are unnecessary. This also works
-with ``--render-only --data figures/runtime/report-data.json``; the sibling
-``report.json`` supplies the selections. Choose a different output directory:
-the source cache cannot also be that directory's generated ``report-data.json``.
-Replay reads the supplied cache without appending an invocation or taking a
-writer lock. The new report records the current script revision and replay
-arguments; the measurement data retains its original collection configuration.
-
-To apply new CLI arguments and requirements using the current measurement
-cache, run normally. This may collect missing measurements and overwrites the
-figure and bundle in the chosen folder:
-
-.. code-block:: bash
-
-   python demo/eval.py --only runtime --samples 5 --data demo/out/paper/results.json --output figures/runtime
+Replay leaves the source bundle unchanged. To replace the original figure
+using new arguments and the current cache, use a normal run, as shown in the
+:doc:`cli`. Each output directory holds one report.
 
 The bundle is published with the figures only after rendering succeeds. Errors
 and Ctrl+C remove generated outputs, including a previous bundle, while
 preserving the source cache. If rendering fails before a report is published,
 run normally again to reuse the collected data and retry rendering.
 
-The data records both the collecting script's commit and the workload commits.
-The report separately records the script's commit at rendering time. Commit your
-evaluation code before generating final outputs. Uncommitted changes anywhere
-in the script's checkout produce a warning and set ``script_dirty`` in the
-record; the revision alone cannot reproduce those changes. Scripts outside
-Git have no recorded revision. The report does not export a standalone script
-copy. Preserve the repository and rendering dependencies as well as the data.
+The data retains the collecting script's commit and workload commits; the new
+report records the script's revision at rendering time. Commit the evaluation
+code before generating final outputs. Uncommitted changes in its checkout
+produce a warning because the revision alone cannot reproduce them. Preserve
+the code and rendering dependencies as well as the data.
 
 Avoid misleading results
 ------------------------

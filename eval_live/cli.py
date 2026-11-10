@@ -27,8 +27,8 @@ def add_arguments(parser: ArgumentParser, *, output: str | Path = "out") -> Argu
     Unknown script arguments affect cache identity unless explicitly excluded
     with ``Registry(selection_arguments=...)``. Every argument is saved.
     """
-    parser.add_argument("--output", type=Path, default=Path(output), help="directory for artifacts, HTML, report.json, and report-data.json")
-    parser.add_argument("--data", type=Path, default=None, help="JSON data/cache file (default: OUTPUT/results.json)")
+    parser.add_argument("--output", type=Path, default=Path(output), help="directory for artifacts, HTML, reproduce.json, and results.json")
+    parser.add_argument("--data", type=Path, default=None, help="JSON data/cache file (default: OUTPUT/cache.json)")
     parser.add_argument("--only", nargs="+", default=None, metavar="ARTIFACT",
                         help="selected artifact IDs; one ID exports just that output and its data")
     parser.add_argument("--benchmarks", nargs="+", default=None, metavar="BENCHMARK", help="allowed benchmark names")
@@ -42,5 +42,5 @@ def add_arguments(parser: ArgumentParser, *, output: str | Path = "out") -> Argu
     parser.add_argument("--render-only", action="store_true",
                         help="replay bundled data with the current script; requires --report or --data and a different --output")
     parser.add_argument("--report", type=Path, default=None,
-                        help="report.json to replay using only its sibling report-data.json")
+                        help="reproduce.json to replay using only its sibling results.json")
     return parser

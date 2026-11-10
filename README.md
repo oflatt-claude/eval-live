@@ -81,12 +81,10 @@ python demo/eval.py
 
 Open `demo/out/paper/index.html` for the interactive report. Its Python graphs and
 computed tables load Pyodide and matplotlib from a CDN; raw tables work without
-that runtime. The demo writes all data to `demo/out/paper/results.json` and
+that runtime. The demo writes all data to `demo/out/paper/cache.json` and
 paper artifacts alongside it. Run it again to reuse cached observations;
 `--samples 5` changes the demo's configuration, `--only summary` selects a subset, and
-`--dry-run` explains required work without running it. `--render-only` regenerates
-outputs from a report bundle without the benchmark repository; pass
-`--report PATH/report.json` and a different `--output` directory.
+`--dry-run` explains required work without running it.
 Timeouts are disabled by default; `--timeout 60` opts into a per-command limit.
 Increasing it reuses successes and recollects timed-out treatments. Repeating
 the same deadline reuses timeout rows; ordinary error rows are reused until
@@ -114,10 +112,10 @@ its tables and graphs together. Each output directory holds one report; use
 separate directories to retain different subsets or comparisons. Each report
 includes two files:
 
-- `report-data.json`: the normal cache format, containing all already-collected
+- `results.json`: the normal cache format, containing all already-collected
   data for each repository/commit pair used by the report. It includes other
   treatments, configurations, versions, and attempts from those commits.
-- `report.json`: the selected output IDs and exact runs, resolved CLI arguments
+- `reproduce.json`: the selected output IDs and exact runs, resolved CLI arguments
   and defaults, original command-line tokens, and evaluation script's Git revision.
 
 The HTML embeds the exported data; each figure receives only its selected runs.
@@ -125,37 +123,38 @@ No extra measurements are collected just to fill the export. Figure selections
 belong to the report, never to the measurement cache.
 
 The data retains the collecting script revision and workload commits.
-`report.json` separately records the script revision used to render the figures.
-Uncommitted changes in the script's checkout produce a warning because the saved revision cannot
-reproduce those changes. Commit the evaluation code before generating final
-paper outputs. The script is not copied into a separate file.
+`reproduce.json` separately records the script revision used to render the figures.
+Uncommitted changes in the script's checkout produce a warning: the saved
+revision cannot reproduce those changes. Commit the evaluation code before
+generating final paper outputs.
 
 Export just one figure and its data to a folder:
 
 ```bash
-python demo/eval.py --only runtime --data demo/out/paper/results.json --output figures/runtime
+python demo/eval.py --only runtime --data demo/out/paper/cache.json --output figures/runtime
 ```
 
-This writes `runtime.pdf`, `index.html`, `report-data.json`, and `report.json`.
+This writes `runtime.pdf`, `index.html`, `results.json`, and `reproduce.json`.
 Keep both JSON files together. Recompute with the current evaluation script
 and its rendering dependencies, without the original cache or workload
 repository:
 
 ```bash
-python demo/eval.py --render-only --report figures/runtime/report.json --output figures/replayed-runtime
+python demo/eval.py --render-only --report figures/runtime/reproduce.json \
+    --output figures/replayed-runtime
 ```
 
-Use a different output directory when replaying an export: its
-`report-data.json` filename is reserved for the newly generated subset. Replay
-uses only the bundled data and recorded runs, leaves those inputs unchanged,
-and records the current script revision for the new figures. It never reads
-or falls back to the normal cache, and never checks out code.
+Replay requires a different output directory and leaves the input bundle
+unchanged. It uses only the bundled data and recorded selections, with no
+fallback to the normal cache or Git checkout. The new report records the
+current script's revision.
 
 To regenerate with new arguments and your current measurement cache instead,
 run normally. This replaces the figure and its report bundle in that folder:
 
 ```bash
-python demo/eval.py --only runtime --samples 5 --data demo/out/paper/results.json --output figures/runtime
+python demo/eval.py --only runtime --samples 5 --data demo/out/paper/cache.json \
+    --output figures/runtime
 ```
 
 Reliable statistics still depend on the evaluation script: pin measurement

@@ -17,8 +17,8 @@ from . import latex
 from .store import atomic_write, parameters, scalar, validate_tables
 
 PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyodide.js"
-REPORT_DATA = "report-data.json"
-REPORT = "report.json"
+REPORT_DATA = "results.json"
+REPORT = "reproduce.json"
 
 
 def discard_outputs(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", table_json=False):
@@ -30,7 +30,9 @@ def discard_outputs(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", ta
     names = {f"{item.id}.{fmt if item.kind == 'graph' else 'tex'}" for item in artifacts}
     if table_json:
         names.update(f"{item.id}.json" for item in artifacts if item.kind == "table")
-    names.update(("index.html", REPORT_DATA, REPORT))
+    names.update(("index.html", REPORT))
+    if (output / REPORT).exists():
+        names.add(REPORT_DATA)
     manifest = output / ".eval-live-outputs"
     if manifest.exists():
         names.update(manifest.read_text().splitlines())

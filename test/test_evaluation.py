@@ -214,7 +214,7 @@ class EvaluationTests(unittest.TestCase):
         self.commit_value(20)
         self.head = self.git("rev-parse", "HEAD")
         self.output = self.root / "output"
-        self.data = self.output / "results.json"
+        self.data = self.output / "cache.json"
         self.treatments = []
 
     def git(self, *args):
@@ -257,8 +257,8 @@ class EvaluationTests(unittest.TestCase):
         if render:
             return evaluation.run(args=args, argv=["--test"])
         def save_record(data, artifacts, selections, output, *, report, **kwargs):
-            atomic_write(output / "report.json", json.dumps(report))
-            atomic_write(output / "report-data.json", json.dumps(data))
+            atomic_write(output / "reproduce.json", json.dumps(report))
+            atomic_write(output / "results.json", json.dumps(data))
             return []
 
         with patch("eval_live.planning.render_artifacts", side_effect=save_record):
@@ -266,12 +266,12 @@ class EvaluationTests(unittest.TestCase):
 
     def copy_report(self):
         directory = Path(tempfile.mkdtemp(dir=self.root))
-        for name in ("report.json", "report-data.json"):
+        for name in ("reproduce.json", "results.json"):
             shutil.copy2(self.output / name, directory / name)
-        return directory / "report.json"
+        return directory / "reproduce.json"
 
     def report(self):
-        return json.loads((self.output / "report.json").read_text())
+        return json.loads((self.output / "reproduce.json").read_text())
 
     def stored(self):
         return eval_live.Store(self.data).data
@@ -562,8 +562,8 @@ class EvaluationTests(unittest.TestCase):
             self.run_eval(reg, render=True, force=True)
         self.assertFalse((self.output / "values.tex").exists())
         self.assertFalse((self.output / "index.html").exists())
-        self.assertFalse((self.output / "report-data.json").exists())
-        self.assertFalse((self.output / "report.json").exists())
+        self.assertFalse((self.output / "results.json").exists())
+        self.assertFalse((self.output / "reproduce.json").exists())
         self.assertTrue(self.data.exists())
 
     def test_interrupt_during_render_or_publication_removes_all_artifacts(self):
@@ -587,8 +587,8 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(list(self.output.glob("*.pdf")), [])
             self.assertEqual(list(self.output.glob("*.tex")), [])
             self.assertFalse((self.output / "index.html").exists())
-            self.assertFalse((self.output / "report-data.json").exists())
-            self.assertFalse((self.output / "report.json").exists())
+            self.assertFalse((self.output / "results.json").exists())
+            self.assertFalse((self.output / "reproduce.json").exists())
             self.assertTrue(self.data.exists())
 
     def test_browser_rejects_unsafe_integers_without_corrupting_saved_data(self):
@@ -1018,7 +1018,7 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual({row["run_id"] for row in embedded["measurements"]}, expected)
             self.assertNotIn("eval_selections", embedded)
             self.assertNotIn("eval_requirements", saved)
-            report_path = self.output / "report-data.json"
+            report_path = self.output / "results.json"
             self.assertEqual(eval_live.Store(report_path).data, embedded)
             self.assertIn(report_path, result.written)
             self.assertGreater(len(saved["eval_runs"]), len(embedded["eval_runs"]))
@@ -1037,7 +1037,7 @@ class EvaluationTests(unittest.TestCase):
         replay = self.run_eval(reg, render=True, render_only=True)
         check_report(replay, {self.head, self.old}, 2)
         replay = self.run_eval(evaluation(self.request(samples=3)), render=True, render_only=True, report=original)
-        self.assertEqual(len(eval_live.Store(self.output / "report-data.json").data["eval_runs"]), 3)
+        self.assertEqual(len(eval_live.Store(self.output / "results.json").data["eval_runs"]), 3)
         self.assertEqual(self.report()["selections"], original_selections)
 
     def test_single_figure_subset_replays_without_original_cache_or_repository(self):
@@ -1049,20 +1049,20 @@ class EvaluationTests(unittest.TestCase):
         output = self.root / "one-figure"
         result = reg.run(args={"output": output, "data": self.data, "only": ["plot"]}, argv=[])
         self.assertEqual((result.collected, result.reused), (0, 1))
-        self.assertEqual({path.name for path in result.written}, {"plot.pdf", "index.html", "report-data.json", "report.json"})
+        self.assertEqual({path.name for path in result.written}, {"plot.pdf", "index.html", "results.json", "reproduce.json"})
         self.assertFalse((output / "table.tex").exists())
-        subset = eval_live.Store(output / "report-data.json").data
+        subset = eval_live.Store(output / "results.json").data
         self.assertEqual(len(subset["eval_runs"]), 3)
         self.assertEqual(len(self.stored()["eval_runs"]), 3)
-        self.assertEqual(set(json.loads((output / "report.json").read_text())["selections"]), {"plot"})
-        plan = reg.plan(args={"data": output / "report-data.json", "output": self.root / "planned",
+        self.assertEqual(set(json.loads((output / "reproduce.json").read_text())["selections"]), {"plot"})
+        plan = reg.plan(args={"data": output / "results.json", "output": self.root / "planned",
                               "only": ["plot"]})
         self.assertEqual((plan.missing, plan.reused), (0, 1))
 
         copied_folder = self.root / "copied"
         shutil.copytree(output, copied_folder)
-        copied = copied_folder / "report-data.json"
-        record = copied_folder / "report.json"
+        copied = copied_folder / "results.json"
+        record = copied_folder / "reproduce.json"
         self.data.unlink()
         shutil.rmtree(output)
         self.repo.rename(self.root / "unavailable-repository")
@@ -1075,7 +1075,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual((result.collected, result.reused), (0, 1))
         self.assertEqual(json.loads(copied.read_text()), subset)
         self.assertTrue((replayed / "plot.pdf").read_bytes().startswith(b"%PDF"))
-        restored = eval_live.Store(replayed / "report-data.json").data
+        restored = eval_live.Store(replayed / "results.json").data
         for name in ("measurements", "eval_runs", "eval_configs", "eval_environments"):
             self.assertEqual(restored[name], subset[name])
         self.assertEqual(len(CALLS), 3)
@@ -1086,7 +1086,7 @@ class EvaluationTests(unittest.TestCase):
         before = {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()}
         for replay in (False, True):
             with self.assertRaisesRegex(ValueError, "reserved for the exported subset"):
-                reg.run(args={"output": self.output, "data": self.output / "report-data.json",
+                reg.run(args={"output": self.output, "data": self.output / "results.json",
                               "render_only": replay}, argv=[])
             self.assertEqual(before, {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()})
         self.assertEqual(len(CALLS), 1)
@@ -1095,7 +1095,7 @@ class EvaluationTests(unittest.TestCase):
         reg = self.evaluation()
         self.run_eval(reg, render=True)
         report = self.copy_report()
-        source_data = report.with_name("report-data.json")
+        source_data = report.with_name("results.json")
         source_bytes = source_data.read_bytes()
         self.run_eval(reg, force=True)
         for args in (
@@ -1116,6 +1116,27 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(source_data.read_bytes(), source_bytes)
         self.assertEqual(self.data.read_text(), "broken normal cache")
         self.assertEqual(len(CALLS), 2)
+
+    def test_export_preserves_an_existing_standalone_results_file(self):
+        reg = self.evaluation()
+        self.run_eval(reg, render=True)
+        standalone = self.root / "standalone"
+        standalone.mkdir()
+        existing = standalone / "results.json"
+        existing.write_bytes(self.data.read_bytes())
+        before = existing.read_bytes()
+        for args in ({}, {"data": self.data}, {"render_only": True, "report": self.copy_report()}):
+            with self.assertRaisesRegex(ValueError, "existing results.json"):
+                reg.run(args={"output": standalone, **args}, argv=[])
+            self.assertEqual(existing.read_bytes(), before)
+            self.assertEqual(list(standalone.iterdir()), [existing])
+        from eval_live.render import discard_outputs
+        discard_outputs(standalone, reg._outputs)
+        self.assertEqual(existing.read_bytes(), before)
+
+        result = reg.run(args={"data": existing, "output": self.root / "regenerated"}, argv=[])
+        self.assertEqual((result.collected, result.reused), (0, 1))
+        self.assertEqual(len(CALLS), 1)
 
     def test_report_rejects_invalid_selections_before_changing_outputs(self):
         reg = self.evaluation()
@@ -1168,7 +1189,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(CALLS), 1)
 
         source_report = self.copy_report()
-        source_data = source_report.with_name("report-data.json").read_bytes()
+        source_data = source_report.with_name("results.json").read_bytes()
         script.write_text(script.read_text() + "# changed rendering code\n")
         self.git("add", "eval.py")
         self.commit_value(30)
@@ -1177,17 +1198,17 @@ class EvaluationTests(unittest.TestCase):
             self.run_eval(reg, render=True, render_only=True, report=source_report)
         self.assertEqual(self.report()["invocation"]["script_commit"], rendering_commit)
         self.assertFalse(self.report()["invocation"]["script_dirty"])
-        exported = eval_live.Store(self.output / "report-data.json").data
+        exported = eval_live.Store(self.output / "results.json").data
         self.assertEqual({r["script_commit"] for r in exported["eval_invocations"]}, {script_commit})
         self.assertEqual({r["commit"] for r in exported["eval_runs"]}, {self.old})
-        self.assertEqual(source_report.with_name("report-data.json").read_bytes(), source_data)
+        self.assertEqual(source_report.with_name("results.json").read_bytes(), source_data)
         self.assertEqual(len(CALLS), 1)
 
     def test_export_can_supply_more_data_to_changed_requirements(self):
         self.run_eval(self.evaluation(self.request(samples=3)), render=True)
         reg = self.evaluation(self.request(samples=1))
         self.run_eval(reg, render=True)
-        bundle = self.output / "report-data.json"
+        bundle = self.output / "results.json"
         expanded = self.evaluation(self.request(samples=3))
         result = expanded.run(args={"data": bundle, "output": self.root / "expanded"}, argv=[])
         self.assertEqual((result.collected, result.reused), (0, 3))
@@ -1296,8 +1317,8 @@ class EvaluationTests(unittest.TestCase):
         result = self.run_eval(self.evaluation(registry=reg), render=True)
         self.assertEqual((result.collected, result.reused), (0, 2))
         self.assertEqual(len(reg.run_tables(self.stored())[0]["rows"]), 3)
-        self.assertEqual({p.name for p in self.output.glob("*.json")}, {"results.json", "report-data.json", "report.json"})
-        self.assertEqual(len(eval_live.Store(self.output / "report-data.json").data["eval_runs"]), 3)
+        self.assertEqual({p.name for p in self.output.glob("*.json")}, {"cache.json", "results.json", "reproduce.json"})
+        self.assertEqual(len(eval_live.Store(self.output / "results.json").data["eval_runs"]), 3)
         self.assertIn(r"\newcommand{\PaperCount}{2}", (self.output / "macros.tex").read_text())
         self.assertIn(r"x\_y \& z", (self.output / "macros.tex").read_text())
         self.assertTrue((self.output / "figure.pdf").read_bytes().startswith(b"%PDF"))
