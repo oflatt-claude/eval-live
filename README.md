@@ -81,8 +81,8 @@ python demo/eval.py
 
 Open `demo/out/paper/index.html` for the interactive report. Its Python graphs and
 computed tables load Pyodide and matplotlib from a CDN; raw tables work without
-that runtime. The demo writes all data to `demo/out/paper/cache.json` and
-paper artifacts alongside it. Run it again to reuse cached observations;
+that runtime. The demo keeps its measurement cache in `demo/out/cache.json`
+and writes paper artifacts to `demo/out/paper/`. Run it again to reuse cached observations;
 `--samples 5` changes the demo's configuration, `--only summary` selects a subset, and
 `--dry-run` explains required work without running it.
 Timeouts are disabled by default; `--timeout 60` opts into a per-command limit.
@@ -106,10 +106,17 @@ Reporting errors fail the CLI after other outputs are evaluated; warnings do not
 Generated files are published only after successful rendering. A failed or
 interrupted invocation removes generated outputs while preserving saved data.
 
-Only measurement data is cached. Figures, tables, macros, and the webpage are
-regenerated on each run. Browser filter changes recompute the report and publish
-its tables and graphs together. Each output directory holds one report; use
-separate directories to retain different subsets or comparisons. Each report
+Only measurement data is cached. Before collection or rendering starts,
+eval-live clears **all files in the output directory**, including hidden and
+unrecognized files. It stops before deleting anything if it finds a subdirectory
+or symlink. Keep source files and caches outside it. The default
+cache is `cache.json` beside the output directory; the demo's workload repository
+is also outside `paper/`, in `demo/out/repository/`. Validation failures and
+`--dry-run` leave existing outputs untouched.
+
+Figures, tables, macros, and the webpage are regenerated on each run. Browser
+filter changes recompute the report and publish its tables and graphs together.
+Use separate output directories to retain different reports. Each report
 includes two files:
 
 - `results.json`: the normal cache format, containing all already-collected
@@ -131,7 +138,7 @@ generating final paper outputs.
 Export just one figure and its data to a folder:
 
 ```bash
-python demo/eval.py --only runtime --data demo/out/paper/cache.json --output figures/runtime
+python demo/eval.py --only runtime --data demo/out/cache.json --output figures/runtime
 ```
 
 This writes `runtime.pdf`, `index.html`, `results.json`, and `reproduce.json`.
@@ -153,7 +160,7 @@ To regenerate with new arguments and your current measurement cache instead,
 run normally. This replaces the figure and its report bundle in that folder:
 
 ```bash
-python demo/eval.py --only runtime --samples 5 --data demo/out/paper/cache.json \
+python demo/eval.py --only runtime --samples 5 --data demo/out/cache.json \
     --output figures/runtime
 ```
 

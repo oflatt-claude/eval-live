@@ -214,7 +214,7 @@ class EvaluationTests(unittest.TestCase):
         self.commit_value(20)
         self.head = self.git("rev-parse", "HEAD")
         self.output = self.root / "output"
-        self.data = self.output / "cache.json"
+        self.data = self.root / "cache.json"
         self.treatments = []
 
     def git(self, *args):
@@ -542,15 +542,51 @@ class EvaluationTests(unittest.TestCase):
         reg.graph("Plot", figure, id="plot")
         self.run_eval(reg, render=True)
         self.assertTrue((self.output / "plot.pdf").exists())
-        (self.output / "notes.txt").write_text("keep")
+        (self.output / "notes.txt").write_text("obsolete")
+        (self.output / ".hidden").write_text("obsolete")
         reg = self.evaluation()
         reg.graph("Plot", omitted_figure, id="plot")
         self.run_eval(reg, render=True)
         self.assertFalse((self.output / "plot.pdf").exists())
         self.run_eval(reg, render=True, only=["plot"])
         self.assertFalse((self.output / "values.tex").exists())
-        self.assertEqual((self.output / "notes.txt").read_text(), "keep")
+        self.assertFalse((self.output / "notes.txt").exists())
+        self.assertFalse((self.output / ".hidden").exists())
+        self.assertFalse((self.output / ".eval-live-outputs").exists())
         self.assertTrue(self.data.exists())
+
+    def test_unexpected_output_subdirectories_and_symlinks_stop_before_deleting(self):
+        reg = self.evaluation()
+        self.run_eval(reg, render=True)
+        original = {path.name: path.read_bytes() for path in self.output.iterdir()}
+        cache = self.data.read_bytes()
+        target = self.root / "keep.txt"
+        target.write_text("keep")
+        target_dir = self.root / "keep-directory"
+        target_dir.mkdir()
+        (target_dir / "keep.txt").write_text("keep")
+        for kind in ("directory", "file-link", "directory-link", "broken-link"):
+            unexpected = self.output / kind
+            if kind == "directory":
+                unexpected.mkdir()
+                (unexpected / "old.pdf").write_text("inspect")
+            else:
+                unexpected.symlink_to(target if kind == "file-link" else
+                                      target_dir if kind == "directory-link" else self.root / "missing")
+            with self.assertRaisesRegex(ValueError, "unexpected (symlink|subdirectory)"):
+                self.run_eval(reg, render=True)
+            self.assertEqual(original, {path.name: path.read_bytes() for path in self.output.iterdir()
+                                        if path.name != kind})
+            self.assertEqual(self.data.read_bytes(), cache)
+            if kind == "directory":
+                self.assertEqual((unexpected / "old.pdf").read_text(), "inspect")
+                shutil.rmtree(unexpected)
+            else:
+                self.assertTrue(unexpected.is_symlink())
+                unexpected.unlink()
+        self.assertEqual(target.read_text(), "keep")
+        self.assertEqual((target_dir / "keep.txt").read_text(), "keep")
+        self.assertEqual(len(CALLS), 1)
 
     def test_dry_run_preserves_outputs_and_collection_interrupt_removes_them(self):
         reg = self.evaluation()
@@ -1085,7 +1121,7 @@ class EvaluationTests(unittest.TestCase):
         self.run_eval(reg, render=True)
         before = {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()}
         for replay in (False, True):
-            with self.assertRaisesRegex(ValueError, "reserved for the exported subset"):
+            with self.assertRaisesRegex(ValueError, "protected input"):
                 reg.run(args={"output": self.output, "data": self.output / "results.json",
                               "render_only": replay}, argv=[])
             self.assertEqual(before, {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()})
@@ -1117,26 +1153,70 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(self.data.read_text(), "broken normal cache")
         self.assertEqual(len(CALLS), 2)
 
-    def test_export_preserves_an_existing_standalone_results_file(self):
+    def test_output_must_not_contain_cache_or_replay_inputs(self):
         reg = self.evaluation()
         self.run_eval(reg, render=True)
-        standalone = self.root / "standalone"
-        standalone.mkdir()
-        existing = standalone / "results.json"
-        existing.write_bytes(self.data.read_bytes())
-        before = existing.read_bytes()
-        for args in ({}, {"data": self.data}, {"render_only": True, "report": self.copy_report()}):
-            with self.assertRaisesRegex(ValueError, "existing results.json"):
-                reg.run(args={"output": standalone, **args}, argv=[])
-            self.assertEqual(existing.read_bytes(), before)
-            self.assertEqual(list(standalone.iterdir()), [existing])
-        from eval_live.render import discard_outputs
-        discard_outputs(standalone, reg._outputs)
-        self.assertEqual(existing.read_bytes(), before)
-
-        result = reg.run(args={"data": existing, "output": self.root / "regenerated"}, argv=[])
-        self.assertEqual((result.collected, result.reused), (0, 1))
+        before = self.data.read_bytes()
+        for filename in ("cache.json", "nested/cache.json"):
+            nested_cache = self.output / filename
+            nested_cache.parent.mkdir(parents=True, exist_ok=True)
+            nested_cache.write_bytes(before)
+            with self.assertRaisesRegex(ValueError, "protected input"):
+                reg.run(args={"output": self.output, "data": nested_cache}, argv=[])
+            self.assertEqual(nested_cache.read_bytes(), before)
+            nested_cache.unlink()
+        source = self.copy_report()
+        with self.assertRaisesRegex(ValueError, "protected input"):
+            reg.run(args={"output": self.root, "report": source, "render_only": True}, argv=[])
+        self.assertTrue(source.is_file())
+        self.assertEqual(self.data.read_bytes(), before)
         self.assertEqual(len(CALLS), 1)
+
+    def test_output_rejects_source_directories_and_symlinks(self):
+        from eval_live.render import validate_output
+        for output in (Path.cwd(), Path.cwd().parent, Path.home(), Path(Path.cwd().anchor), self.repo):
+            with self.assertRaises(ValueError):
+                validate_output(output)
+        self.assertEqual(validate_output(self.output, [self.output / ".." / "cache.json"]), self.output)
+        link = self.root / "linked-output"
+        link.symlink_to(self.repo, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.evaluation().run(args={"output": link, "data": self.data}, argv=[])
+        self.assertEqual((self.repo / "value.txt").read_text(), "20")
+
+        script = self.root / "script" / "eval.py"
+        script.parent.mkdir()
+        script.write_text("def table(data): return data['measurements']\n")
+        reg = self.evaluation(browser_source=script)
+        with self.assertRaisesRegex(ValueError, "protected input"):
+            reg.run(args={"output": script.parent, "data": self.data}, argv=[])
+        self.assertTrue(script.exists())
+        self.assertEqual(CALLS, [])
+
+    def test_output_must_not_contain_a_workload_repository(self):
+        self.output.mkdir()
+        moved = self.output / "repository"
+        self.repo.rename(moved)
+        self.repo = moved
+        with self.assertRaisesRegex(ValueError, "subdirectory"):
+            self.run_eval(self.evaluation(), render=True)
+        self.assertEqual((moved / "value.txt").read_text(), "20")
+        self.assertEqual(CALLS, [])
+
+    def test_no_arguments_generate_all_outputs_with_a_sibling_cache(self):
+        reg = self.evaluation()
+        reg.macros("Numbers", macros)
+        previous = Path.cwd()
+        try:
+            os.chdir(self.root)
+            result = reg.run(argv=[])
+        finally:
+            os.chdir(previous)
+        self.assertEqual(result.data_path, self.root / "cache.json")
+        self.assertEqual({path.name for path in (self.root / "out").iterdir()},
+                         {"values.tex", "numbers.tex", "index.html", "results.json", "reproduce.json"})
+        self.assertTrue(result.data_path.is_file())
+        self.assertEqual(result.collected, 1)
 
     def test_report_rejects_invalid_selections_before_changing_outputs(self):
         reg = self.evaluation()
@@ -1317,7 +1397,7 @@ class EvaluationTests(unittest.TestCase):
         result = self.run_eval(self.evaluation(registry=reg), render=True)
         self.assertEqual((result.collected, result.reused), (0, 2))
         self.assertEqual(len(reg.run_tables(self.stored())[0]["rows"]), 3)
-        self.assertEqual({p.name for p in self.output.glob("*.json")}, {"cache.json", "results.json", "reproduce.json"})
+        self.assertEqual({p.name for p in self.output.glob("*.json")}, {"results.json", "reproduce.json"})
         self.assertEqual(len(eval_live.Store(self.output / "results.json").data["eval_runs"]), 3)
         self.assertIn(r"\newcommand{\PaperCount}{2}", (self.output / "macros.tex").read_text())
         self.assertIn(r"x\_y \& z", (self.output / "macros.tex").read_text())

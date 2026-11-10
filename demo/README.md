@@ -14,9 +14,16 @@ the same set configuration before and after an optimization.
 No clone or compiler is needed. The full run requires 27 observations, shared
 across the artifact declarations.
 
+`demo/out/` contains the persistent `cache.json`, the benchmark
+`repository/`, and the generated `paper/` directory. Each run clears all
+files in `paper/`, including files it no longer generates. Subdirectories or
+symlinks cause it to stop before deleting anything. Keep anything you want to
+retain outside `paper/`. The cache and
+benchmark repository survive; validation failures and `--dry-run` leave
+`paper/` unchanged.
+
 | File in `demo/out/paper/` | Contents |
 | --- | --- |
-| `cache.json` | All flat measurement tables, CLI arguments, commit/configuration provenance, and process diagnostics |
 | `results.json` | Cache-format data for every already-collected attempt from the commits used by this report |
 | `reproduce.json` | Output selections, resolved CLI arguments, command line, and evaluation script Git revision |
 | `runtime.pdf` | Current-commit list and set timings |
@@ -47,7 +54,7 @@ its default is recorded, even options that do not affect measurement identity.
 To put one figure and its data in a separate folder:
 
 ```bash
-python demo/eval.py --only runtime --data demo/out/paper/cache.json --output figures/runtime
+python demo/eval.py --only runtime --data demo/out/cache.json --output figures/runtime
 ```
 
 The folder contains `runtime.pdf`, `index.html`, `results.json`, and
@@ -69,7 +76,7 @@ To regenerate with new arguments using the current cache, run normally. This
 replaces the figure and bundle in the folder:
 
 ```bash
-python demo/eval.py --only runtime --samples 5 --data demo/out/paper/cache.json \
+python demo/eval.py --only runtime --samples 5 --data demo/out/cache.json \
     --output figures/runtime
 ```
 
@@ -116,9 +123,7 @@ The flag and worker count participate in cache identity. Concurrent timing
 measurements share machine resources, so use `--jobs 1` for sequential timings.
 
 Timings are illustrative and vary with machine load. Container construction is
-outside the timed region. Each invocation replaces the generated report;
-files for unselected outputs are removed. Use separate output directories to
-keep several reports. The HTML embeds `results.json`; figures receive only
+outside the timed region. Use separate output directories to keep several reports. The HTML embeds `results.json`; figures receive only
 their selected rows. Commit the evaluation code before generating final
 outputs: uncommitted changes in its checkout produce a warning. The sibling
 `.lock` file coordinates writers and contains no evaluation data.

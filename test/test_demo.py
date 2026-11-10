@@ -25,7 +25,7 @@ class DemoTests(unittest.TestCase):
                 return completed.stdout
 
             self.assertIn("Collected 6; reused 0", run())
-            data_path = output / "cache.json"
+            data_path = directory / "cache.json"
             initial = json.loads(data_path.read_text())
             self.assertEqual(len(initial["eval_runs"]), 6)
             self.assertEqual({row["status"] for row in initial["eval_invocations"]}, {"success"})
@@ -39,7 +39,7 @@ class DemoTests(unittest.TestCase):
             replay = directory / "replay"
             self.assertIn("Collected 0; reused 12", run("--render-only", "--report", str(output / "reproduce.json"),
                           "--output", str(replay)))
-            self.assertEqual({path.name for path in output.glob("*.json")}, {"cache.json", "results.json", "reproduce.json"})
+            self.assertEqual({path.name for path in output.glob("*.json")}, {"results.json", "reproduce.json"})
             self.assertEqual({path.name for path in output.glob("*.pdf")}, {"runtime.pdf", "history.pdf"})
             self.assertTrue((output / "summary.tex").is_file())
             self.assertTrue((output / "macros.tex").is_file())

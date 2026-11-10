@@ -396,11 +396,14 @@ class Registry:
         stops collection and rendering. Figure warnings/errors are computed,
         deduplicated, and never stored; reporting errors fail after rendering.
 
-        Only measurement data is cached. Validation and ``--dry-run`` leave the
-        previous report in place. Once collection or rendering starts, its files
-        are removed; new files are published only after successful rendering.
-        Errors or Ctrl+C preserve saved data. Use separate output directories to
-        retain reports or run concurrent invocations.
+        All files in the output directory are cleared before collection or
+        rendering, including unrecognized files. Subdirectories or symlinks
+        cause an error before any deletion. Keep inputs outside the directory.
+        The default cache is ``cache.json`` beside that directory. Validation
+        failures and ``--dry-run`` leave outputs untouched. New files are
+        published only after successful rendering; errors or Ctrl+C preserve
+        cached data. Use separate output directories to retain reports or run
+        concurrent invocations.
         """
         from .planning import _Runner
         return _Runner(self).run(args=args, argv=argv)
@@ -439,8 +442,9 @@ class Registry:
         LaTeX. Macros produce LaTeX. Return the written paths. No benchmarks run:
         ``requires`` is used by :meth:`run`, which stores data in one JSON file
         without table sidecars.
-        Replace the previous generated outputs in this directory. A rendering
-        exception removes those outputs; unrelated files are preserved.
+        Clear every file in ``outdir`` before rendering. Subdirectories or
+        symlinks cause an error before deletion. Keep inputs elsewhere.
+        A rendering exception leaves the directory empty.
         """
         from .render import render_outputs
         return [str(path) for path in render_outputs(data, self, outdir,

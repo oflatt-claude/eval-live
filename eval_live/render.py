@@ -6,6 +6,7 @@ import html
 import inspect
 import io
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -21,49 +22,78 @@ REPORT_DATA = "results.json"
 REPORT = "reproduce.json"
 
 
-def discard_outputs(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", table_json=False):
-    """Remove expected artifacts, HTML, and files recorded by previous rendering.
+def source_paths(functions) -> list[Path]:
+    """Return inspectable callback source files for output-path validation."""
+    paths = []
+    for function in functions:
+        try:
+            filename = inspect.getsourcefile(function)
+        except TypeError:
+            continue
+        if filename:
+            paths.append(Path(filename))
+    return paths
 
-    Generated filenames are reserved for eval-live. Files at other paths,
-    including the measurement database, are preserved. Missing files are allowed.
+
+def validate_output(output: Path, protected=()) -> Path:
+    """Reject output paths that would erase working directories or known inputs.
+
+    The output cannot be a symlink, a Git checkout root, or contain the current
+    directory, home directory, or any protected path. Its existing contents
+    must contain no subdirectories or symlinks. Return its resolved path.
     """
-    names = {f"{item.id}.{fmt if item.kind == 'graph' else 'tex'}" for item in artifacts}
-    if table_json:
-        names.update(f"{item.id}.json" for item in artifacts if item.kind == "table")
-    names.update(("index.html", REPORT))
-    if (output / REPORT).exists():
-        names.add(REPORT_DATA)
-    manifest = output / ".eval-live-outputs"
-    if manifest.exists():
-        names.update(manifest.read_text().splitlines())
-    for name in names:
-        if name and Path(name).name == name and name not in (".", ".."):
-            (output / name).unlink(missing_ok=True)
-    manifest.unlink(missing_ok=True)
+    output = output.expanduser()
+    if output.is_symlink():
+        raise ValueError("the output directory must not be a symlink")
+    resolved = output.resolve()
+    if (resolved / ".git").exists():
+        raise ValueError("the output directory must not be a Git checkout root")
+    for path in (Path.cwd(), Path.home(), *protected):
+        path = Path(path).expanduser()
+        if (path.resolve().is_relative_to(resolved)
+                or Path(os.path.abspath(path)).is_relative_to(Path(os.path.abspath(output)))):
+            raise ValueError(f"output directory would delete protected input {path}; "
+                             "keep the cache, replay inputs, and sources outside --output")
+    if resolved.exists():
+        for path in resolved.iterdir():
+            if path.is_symlink() or path.is_dir():
+                kind = "symlink" if path.is_symlink() else "subdirectory"
+                raise ValueError(f"output directory contains an unexpected {kind}: {path}; "
+                                 "inspect and clear it manually before running")
+    return resolved
+
+
+def discard_outputs(output: Path):
+    """Clear every entry in a dedicated output directory, including hidden files.
+
+    Refuse subdirectories or symlinks before deleting any entries. The caller
+    must validate input paths first. Missing output directories are allowed.
+    """
+    output = validate_output(output)
+    if output.exists():
+        for path in output.iterdir():
+            path.unlink()
 
 
 @contextmanager
-def output_directory(output: Path, artifacts: Sequence[_Output], *, fmt="pdf", table_json=False):
-    """Yield an empty staging directory and publish its files on successful exit.
+def output_directory(output: Path):
+    """Clear an output directory and publish staged files on successful exit.
 
-    Write only direct child files there. Previous generated outputs are removed
-    on entry; exceptions, including Ctrl+C, remove partially published outputs
-    and propagate. The caller must prevent concurrent rendering to ``output``.
+    Write only direct child files to the staging directory. Exceptions,
+    including Ctrl+C, remove partially published files and propagate. The
+    caller must protect inputs and prevent concurrent rendering to ``output``.
     """
+    output = validate_output(output)
     output.mkdir(parents=True, exist_ok=True)
-    discard_outputs(output, artifacts, fmt=fmt, table_json=table_json)
-    with tempfile.TemporaryDirectory(prefix=".eval-live-", dir=output) as temporary:
+    discard_outputs(output)
+    with tempfile.TemporaryDirectory(prefix=".eval-live-", dir=output.parent) as temporary:
         staging = Path(temporary)
         try:
             yield staging
-            names = sorted(path.name for path in staging.iterdir())
-            # Record the whole set before moving files so cleanup also covers a
-            # failure partway through publication.
-            atomic_write(output / ".eval-live-outputs", "\n".join(names) + "\n")
-            for name in names:
-                (staging / name).replace(output / name)
+            for path in sorted(staging.iterdir()):
+                path.replace(output / path.name)
         except BaseException:
-            discard_outputs(output, artifacts, fmt=fmt, table_json=table_json)
+            discard_outputs(output)
             raise
 
 
@@ -227,14 +257,17 @@ eval_live.registry = _reg
 
 def render_outputs(data: dict, registry: Registry, output: str | Path, *,
                    fmt: str = "pdf", dpi: int = 150, table_json: bool = False) -> list[Path]:
-    """Replace generated files using supplied data and return their paths.
+    """Clear the output directory, render supplied data, and return file paths.
 
+    Every existing file is removed. Subdirectories and symlinks are rejected
+    before deletion; keep inputs elsewhere.
     Evaluate each output once. ``None`` omits a graph. With ``table_json=True``,
     nonempty tables produce JSON and LaTeX; otherwise even empty tables produce
     a LaTeX file. Exceptions leave no generated report. No measurements are run.
     """
     output = Path(output)
-    with output_directory(output, registry._outputs, fmt=fmt, table_json=table_json) as staging:
+    validate_output(output, source_paths(item.render for item in registry._outputs))
+    with output_directory(output) as staging:
         written, _ = _render_outputs(data, registry, staging, fmt=fmt, dpi=dpi, table_json=table_json,
                                      capture_errors=False)
     return [output / path.name for path in written]
@@ -315,7 +348,8 @@ def render_artifacts(data: dict, artifacts: Sequence[_Output], selections: dict,
         registry._messages[None] = {("warning", warning): None}
         message("warning", warning)
     try:
-        with output_directory(output, artifacts) as staging:
+        validate_output(output, source_paths(item.render for item in artifacts))
+        with output_directory(output) as staging:
             written, tables = _render_outputs(data, registry, staging)
             if artifacts:
                 from . import console

@@ -16,24 +16,33 @@ regenerates every selected figure, table, macro, and HTML page.
 
    python demo/eval.py
    python demo/eval.py --dry-run
-   python demo/eval.py --only runtime --data demo/out/paper/cache.json --output figures/runtime
+   python demo/eval.py --only runtime --data demo/out/cache.json --output figures/runtime
 
 The last command exports one figure with ``reproduce.json`` and
 ``results.json``. Only that figure's required measurements are collected;
 the data export includes all previously collected attempts from its commits.
 See :doc:`data-format` for both JSON formats.
 
-The writable cache defaults to ``OUTPUT/cache.json``. The output's
-``results.json`` is reserved for the exported data. To reuse a standalone
-cache named ``results.json``, pass it with ``--data`` and choose a different
-output directory, or move it to ``cache.json``. An existing standalone
-``results.json`` in the output directory is never overwritten automatically.
+The output directory is disposable: all files, including hidden and
+unrecognized files, are cleared before collection or rendering starts.
+Subdirectories or symlinks cause an error before any deletion; inspect and
+clear them manually. Validation failures and ``--dry-run`` leave the directory
+untouched. A failed or interrupted run leaves no report, while collected
+measurements remain in the cache.
+
+The writable cache defaults to ``cache.json`` beside the output directory:
+``cache.json`` for ``--output out``, or ``demo/out/cache.json`` for the demo.
+``--data`` and replay inputs must be outside the output directory, including
+its subdirectories. Move any existing cache there before running. Output paths
+that would erase the working directory, home directory, a Git checkout root,
+or known source files are rejected. The output directory itself cannot be a
+symlink.
 
 To replace that figure using new measurement arguments and the current cache:
 
 .. code-block:: bash
 
-   python demo/eval.py --only runtime --samples 5 --data demo/out/paper/cache.json \
+   python demo/eval.py --only runtime --samples 5 --data demo/out/cache.json \
        --output figures/runtime
 
 The configuration changes the measurement identity. Matching data is reused;
@@ -86,11 +95,13 @@ Shared options
    * - Option
      - Behavior
    * - ``--output DIR``
-     - Directory for generated files. Defaults to ``out`` unless the script
-       supplies another default; the demo uses ``demo/out/paper``.
+     - Dedicated directory whose files are cleared before running.
+       Subdirectories and symlinks are rejected. Defaults to ``out``; the demo
+       uses ``demo/out/paper``.
    * - ``--data FILE``
-     - Measurement cache for normal runs; defaults to ``OUTPUT/cache.json``.
-       In replay, accepts only the bundle's ``results.json``.
+     - Measurement cache outside the output directory. Defaults to
+       ``cache.json`` beside that directory. In replay, accepts only the source
+       bundle's ``results.json``.
    * - ``--only ID [ID ...]``
      - Select output IDs. Defaults to all registered outputs for a normal run,
        or all outputs recorded in the supplied report for replay.

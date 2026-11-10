@@ -18,7 +18,8 @@ import uuid
 from .eval_live import Registry, _Output
 from .benchmarks import Benchmark, ProcessError, RunContext
 from .cli import CONTROL_ARGUMENTS
-from .render import REPORT, REPORT_DATA, browser_callbacks, discard_outputs, read_report, render_artifacts, report_data
+from .render import (REPORT, REPORT_DATA, browser_callbacks, discard_outputs, read_report,
+                     render_artifacts, report_data, source_paths, validate_output)
 from .store import Store, digest, parameter_rows, parameters, readonly_parameters, run_identity
 from .targets import Target, script_revision
 from ._workers import Outcome, Worker, completed, ignore_interrupts, measure
@@ -211,30 +212,27 @@ class _Runner:
             return Path(options["data"]).expanduser().resolve().with_name(REPORT)
         raise ValueError("--render-only requires --report PATH (or --data PATH/results.json)")
 
-    @classmethod
-    def _data_path(cls, options: dict) -> Path:
+    def _data_path(self, options: dict) -> Path:
         if options["render_only"]:
-            path = cls._report_path(options).with_name(REPORT_DATA)
+            path = self._report_path(options).with_name(REPORT_DATA)
             if options["data"] and Path(options["data"]).expanduser().resolve() != path:
                 raise ValueError("replay uses only the report's sibling results.json; "
                                  "omit --data, or run without --render-only to use a measurement cache")
             if not path.is_file():
                 raise ValueError(f"missing report data: {path}")
         else:
-            path = Path(options["data"] or Path(options["output"]) / "cache.json").expanduser().resolve()
+            path = Path(options["data"] or Path(options["output"]).expanduser().parent / "cache.json").expanduser().resolve()
         if path.suffix.lower() != ".json":
             raise ValueError("the data/cache file must have a .json extension")
-        output = Path(options["output"]).expanduser().resolve()
-        if path in ((output / REPORT_DATA).resolve(), (output / REPORT).resolve()):
-            raise ValueError("results.json and reproduce.json in the output directory are reserved for the exported subset; "
-                             "choose a different --output directory or --data path")
-        if options["render_only"] and cls._report_path(options).parent == output:
-            raise ValueError("replay needs a different --output directory to preserve the source report")
-        manifest = output / ".eval-live-outputs"
-        generated = manifest.read_text().splitlines() if manifest.exists() else []
-        if (output / REPORT_DATA).exists() and not (output / REPORT).exists() and REPORT_DATA not in generated:
-            raise ValueError("existing results.json is not a report bundle; move it to cache.json, "
-                             "or use it with --data and choose a different --output directory")
+        protected = [path]
+        protected.extend(Path(options[name]) for name in ("data", "report") if options[name])
+        if options["render_only"]:
+            protected.append(self._report_path(options))
+        if isinstance(self.browser_source, Path):
+            protected.append(self.browser_source)
+        callbacks = [fn for item in self.artifacts for fn in (item.render, item.interactive_filter)]
+        callbacks.extend(fn for spec in self.benchmarks.values() for fn in (spec.run, spec.build, spec.error_rows))
+        validate_output(Path(options["output"]), [*protected, *source_paths(callbacks)])
         return path
 
     def plan(self, *, args: Namespace | Mapping | None = None) -> Plan:
@@ -515,7 +513,7 @@ class _Runner:
                     )
         invocation = self._invocation_metadata()
         invocation["source_invocation"] = saved["invocation"]["invocation_id"]
-        discard_outputs(Path(options["output"]).expanduser(), self.artifacts)
+        discard_outputs(Path(options["output"]).expanduser())
         written = self._render(store, invocation, artifacts, selections, options, argv)
         return EvaluationResult(invocation["invocation_id"], store.path, 0,
                                 len({run_id for scopes in selections.values() for ids in scopes.values() for run_id in ids}), written)
@@ -523,7 +521,7 @@ class _Runner:
     def run(self, *, args: Namespace | Mapping | None = None, argv: Sequence[str] | None = None) -> EvaluationResult:
         """Plan, collect, checkpoint, and render the selected paper outputs.
 
-        Default: all artifacts, reusable observations from ``out/cache.json``.
+        Default: all artifacts in ``out``, with ``cache.json`` beside that directory.
         ``--dry-run`` returns a plan without writing. ``--render-only`` uses
         saved sample selections without resolving Git or invoking benchmarks.
         Every requested treatment has rows before collection. Errors/timeouts
@@ -544,7 +542,7 @@ class _Runner:
         with store.writer():
             plan = self._plan(options, store)
             print(plan.describe())
-            discard_outputs(Path(options["output"]).expanduser(), self.artifacts)
+            discard_outputs(Path(options["output"]).expanduser())
             reused = plan.reused
             with self._invocation(store, options, tokens) as invocation:
                 attempts = self._reserve(store, plan, invocation)

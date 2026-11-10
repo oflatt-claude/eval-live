@@ -17,7 +17,7 @@ tables, and macros. ``demo/eval.py`` is a complete single-script example:
        --output figures/replayed
 
 The demo creates a tiny local Git repository with two commits. No clone or
-compiler is needed. It writes one ``demo/out/paper/cache.json`` data/cache
+compiler is needed. It writes one ``demo/out/cache.json`` data/cache
 file plus ``runtime.pdf``, ``history.pdf``, ``summary.tex``, ``macros.tex``, and
 ``index.html``. A ``reproduce.json`` generation record and ``results.json``
 export accompany the outputs. The sibling lock file coordinates writers and
@@ -376,16 +376,19 @@ during replay: to change the requirements or measurement arguments, run normally
 with ``--data``. This applies the usual cache identity and may collect missing
 measurements. The :doc:`cli` describes both modes and their options.
 
-Only measurement data is cached. Each run regenerates figures, tables, macros,
-and HTML, replacing the previous generated report in its output directory.
-Outputs omitted by ``--only`` or callbacks returning ``None`` are removed.
-``--data PATH`` shares a measurement cache across output directories; use
-separate output directories to keep several reports. Concurrent runs must
-use separate output directories.
+Only measurement data is cached. Collection and rendering clear all files in
+the output directory, including unrecognized and hidden files. Subdirectories
+or symlinks cause an error before any deletion. Figures, tables, macros, and
+HTML are regenerated. Keep caches, source code, and replay inputs outside that
+directory. The default cache is ``cache.json``
+beside it. ``--data PATH`` shares a cache across output directories; use separate
+output directories to retain reports or run concurrent evaluations.
+Validation failures and ``--dry-run`` preserve the existing directory.
 
 ``run_tables(data)``, ``run_graphs(data)``, the terminal renderer, and
 ``render_to_dir(data, path)`` use data supplied by the caller and never collect.
-The directory renderer writes table JSON sidecars. ``reg.run`` also exports a
+The directory renderer clears its output directory and writes table JSON
+sidecars. ``reg.run`` also exports a
 report bundle containing data and generation metadata.
 
 Export one figure and its data
@@ -396,7 +399,7 @@ Combine ``--only`` with ``--output`` to generate a folder for one figure. Point
 
 .. code-block:: bash
 
-   python demo/eval.py --only runtime --data demo/out/paper/cache.json --output figures/runtime
+   python demo/eval.py --only runtime --data demo/out/cache.json --output figures/runtime
 
 The folder contains ``runtime.pdf``, ``index.html``, ``results.json``, and
 ``reproduce.json``. Only the figure's required measurements are collected, but
