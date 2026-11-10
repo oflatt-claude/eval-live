@@ -12,7 +12,8 @@ macros. It creates a tiny local Git repository with two commits and runs all
 four paper outputs. It compares list/set membership across input sizes and
 the same set configuration before and after an optimization.
 No clone or compiler is needed. The full run requires 27 observations, shared
-across the artifact declarations.
+across the artifact declarations. After saving the outputs, it opens the HTML
+report in your browser. Use `--no-browser` to save without opening it.
 
 `demo/out/` contains the persistent `cache.json`, the benchmark
 `repository/`, and the generated `paper/` directory. Each run clears all

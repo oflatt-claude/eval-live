@@ -201,6 +201,9 @@ def large_measurement(context):
 
 class EvaluationTests(unittest.TestCase):
     def setUp(self):
+        browser = patch("eval_live.planning.webbrowser.open", return_value=True)
+        self.browser = browser.start()
+        self.addCleanup(browser.stop)
         CALLS.clear()
         BUILDS.clear()
         self.temporary = tempfile.TemporaryDirectory()
@@ -1217,6 +1220,61 @@ class EvaluationTests(unittest.TestCase):
                          {"values.tex", "numbers.tex", "index.html", "results.json", "reproduce.json"})
         self.assertTrue(result.data_path.is_file())
         self.assertEqual(result.collected, 1)
+        self.browser.assert_called_once_with((self.root / "out" / "index.html").as_uri())
+
+    def test_browser_opens_after_publication_and_cache_unlock_including_replay(self):
+        reg = self.evaluation()
+
+        def opened(url):
+            self.assertEqual(url, (self.output / "index.html").as_uri())
+            for name in ("index.html", "values.tex", "results.json", "reproduce.json"):
+                self.assertTrue((self.output / name).is_file())
+            with eval_live.Store(self.data).writer() as store:
+                self.assertEqual(store.data["eval_invocations"][-1]["status"], "success")
+            return True
+
+        self.browser.side_effect = opened
+        self.run_eval(reg, render=True)
+        self.run_eval(reg, render=True, render_only=True)
+        self.assertEqual(self.browser.call_count, 2)
+
+    def test_no_browser_is_recorded_without_changing_cache_identity(self):
+        parser = eval_live.add_arguments(argparse.ArgumentParser())
+        self.assertFalse(parser.parse_args([]).no_browser)
+        self.assertTrue(parser.parse_args(["--no-browser"]).no_browser)
+        reg = self.evaluation()
+        self.run_eval(reg, render=True, no_browser=True)
+        self.browser.assert_not_called()
+        self.assertTrue(self.report()["arguments"]["no_browser"])
+        result = self.run_eval(reg, render=True)
+        self.assertEqual((result.collected, result.reused), (0, 1))
+        self.assertFalse(self.report()["arguments"]["no_browser"])
+        self.browser.assert_called_once()
+
+    def test_dry_runs_errors_and_interruptions_never_open_a_browser(self):
+        from dataclasses import replace
+        reg = self.evaluation()
+        self.run_eval(reg, render=True, dry_run=True)
+        with patch("eval_live.planning._Runner._collect", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.run_eval(reg, render=True)
+        reg._outputs[0] = replace(reg._outputs[0], render=broken_figure)
+        with redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "rendering reported errors"):
+            self.run_eval(reg, render=True)
+        self.browser.assert_not_called()
+
+    def test_unavailable_browser_does_not_fail_the_saved_evaluation(self):
+        import webbrowser
+        reg = self.evaluation()
+        for failure in (None, webbrowser.Error("unavailable"), OSError("unavailable")):
+            self.browser.return_value = False
+            self.browser.side_effect = failure
+            with redirect_stderr(io.StringIO()) as output:
+                self.run_eval(reg, render=True)
+            self.assertIn("Could not open a browser", output.getvalue())
+            self.assertIn((self.output / "index.html").as_uri(), output.getvalue())
+            self.assertEqual(self.stored()["eval_invocations"][-1]["status"], "success")
+            self.assertTrue((self.output / "reproduce.json").is_file())
+        self.assertEqual(len(CALLS), 1)
 
     def test_report_rejects_invalid_selections_before_changing_outputs(self):
         reg = self.evaluation()

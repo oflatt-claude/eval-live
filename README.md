@@ -3,8 +3,9 @@
 eval-live is an opinionated way to run paper evaluations. A paper evaluation
 should be a single Python script that generates all the figures, LaTeX macros,
 tables, and other artifacts the paper needs. With no arguments, that script
-runs the entire evaluation. Command-line arguments change parameters or select
-subsets of the work.
+runs the entire evaluation and opens the report in your browser. Use
+`--no-browser` for automated runs. Command-line arguments change parameters or
+select subsets of the work.
 
 All command-line arguments, including their defaults, belong with the data so
 that results can be reproduced. All evaluation data should be stored as flat

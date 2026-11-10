@@ -14,6 +14,7 @@ import sys
 import time
 from typing import Mapping, Sequence
 import uuid
+import webbrowser
 
 from .eval_live import Registry, _Output
 from .benchmarks import Benchmark, ProcessError, RunContext
@@ -176,7 +177,7 @@ class _Runner:
     def _options(args: Namespace | Mapping | None) -> dict:
         supplied = vars(args) if isinstance(args, Namespace) else dict(args or {})
         options = dict(output="out", data=None, only=None, benchmarks=None, force=False,
-                       dry_run=False, render_only=False, report=None, timeout=None,
+                       dry_run=False, render_only=False, report=None, timeout=None, no_browser=False,
                        commit="HEAD", jobs=os.cpu_count() or 1)
         options.update(parameters(supplied))
         if type(options["jobs"]) is not int or options["jobs"] < 1:
@@ -526,12 +527,27 @@ class _Runner:
         saved sample selections without resolving Git or invoking benchmarks.
         Every requested treatment has rows before collection. Errors/timeouts
         use explicit error rows; renderers decide whether to report messages.
+        Open the completed HTML report unless ``--no-browser`` is set. Browser
+        availability does not affect the saved evaluation's success.
         """
         options = self._options(args)
+        result = self._execute(options, list(sys.argv[1:] if argv is None else argv))
+        report = next((path for path in result.written if path.name == "index.html"), None)
+        if report is not None and not options["no_browser"]:
+            url = report.resolve().as_uri()
+            try:
+                opened = webbrowser.open(url)
+            except (webbrowser.Error, OSError):
+                opened = False
+            if not opened:
+                print(f"Could not open a browser. Open the saved report: {url}", file=sys.stderr)
+        return result
+
+    def _execute(self, options: dict, tokens: Sequence[str]) -> EvaluationResult:
+        """Complete file publication and release the cache lock before returning."""
         # Validate only selected outputs, before collection or changing saved files.
         if not options["render_only"]:
             browser_callbacks(self._artifacts(options), self.browser_source)
-        tokens = list(sys.argv[1:] if argv is None else argv)
         store = Store(self._data_path(options))
         if options["dry_run"]:
             plan = self._plan(options, store)

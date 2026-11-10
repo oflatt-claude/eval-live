@@ -385,6 +385,10 @@ class Registry:
         ``--only ID --output DIR`` exports one output and its data. Replay an
         export into a different directory to preserve the source bundle.
 
+        A successful run or replay opens the HTML report in the default browser
+        unless ``--no-browser`` is set. Browser failures print the report's
+        location without failing the evaluation.
+
         ``--timeout`` overrides command deadlines; raising it preserves
         successful samples and recollects timed-out work. ``--dry-run`` inspects
         the plan; ``--render-only --report PATH`` replays saved selections without

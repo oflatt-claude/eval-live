@@ -12,6 +12,10 @@ With no arguments, the script runs all declared outputs. It resolves their
 requirements, reuses matching measurements, collects missing treatments, and
 regenerates every selected figure, table, macro, and HTML page.
 
+After a successful run or replay, the HTML report opens in the default browser.
+Use ``--no-browser`` in CI or to save without opening it. If no browser is
+available, the CLI prints the report's location and still succeeds.
+
 .. code-block:: bash
 
    python demo/eval.py
@@ -105,6 +109,9 @@ Shared options
    * - ``--only ID [ID ...]``
      - Select output IDs. Defaults to all registered outputs for a normal run,
        or all outputs recorded in the supplied report for replay.
+   * - ``--no-browser``
+     - Save the report without opening it in a browser. Does not affect
+       measurement cache identity.
    * - ``--render-only``
      - Replay a bundle. Requires ``--report`` or ``--data`` and a different
        output directory. Cannot be combined with ``--force`` or ``--dry-run``.

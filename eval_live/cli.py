@@ -8,7 +8,7 @@ from pathlib import Path
 # still saved in eval_arguments, including defaults.
 CONTROL_ARGUMENTS = frozenset({
     "output", "data", "only", "benchmarks", "commit",
-    "force", "dry_run", "render_only", "report", "timeout",
+    "force", "dry_run", "render_only", "report", "timeout", "no_browser",
 })
 
 
@@ -44,4 +44,5 @@ def add_arguments(parser: ArgumentParser, *, output: str | Path = "out") -> Argu
                         help="replay bundled data with the current script; requires --report or --data and a different --output")
     parser.add_argument("--report", type=Path, default=None,
                         help="reproduce.json to replay using only its sibling results.json")
+    parser.add_argument("--no-browser", action="store_true", help="save the report without opening a browser")
     return parser

@@ -16,7 +16,7 @@ class DemoTests(unittest.TestCase):
             repo = directory / "repository"
             output = directory / "paper"
             args = ["--repository", str(repo), "--output", str(output),
-                    "--sizes", "20", "50", "--samples", "1"]
+                    "--sizes", "20", "50", "--samples", "1", "--no-browser"]
 
             def run(*extra):
                 completed = subprocess.run([sys.executable, str(ROOT / "demo/eval.py"), *args, *extra],
