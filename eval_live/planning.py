@@ -1,13 +1,11 @@
 """Plan from artifact requirements, collect missing observations, then render."""
 from __future__ import annotations
 
-from argparse import Namespace
+from argparse import ArgumentParser, Namespace
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import inspect
-import math
-import os
 from pathlib import Path
 import platform
 import sys
@@ -17,8 +15,8 @@ import uuid
 import webbrowser
 
 from .eval_live import Registry, _Output
-from .benchmarks import Benchmark, ProcessError, RunContext
-from .cli import CONTROL_ARGUMENTS, validate_replay
+from .benchmarks import Benchmark, ProcessError, RunContext, _validate_timeout
+from .cli import CONTROL_ARGUMENTS, add_arguments, validate_replay
 from .render import (REPORT, REPORT_DATA, browser_callbacks, discard_outputs, read_report,
                      render_artifacts, report_data, source_paths, validate_output)
 from .store import Store, digest, parameter_rows, parameters, readonly_parameters, run_identity
@@ -182,15 +180,11 @@ class _Runner:
             raise ValueError(f"unsupported options: {', '.join(sorted(removed))}; use cache or replay")
         if supplied.get("replay"):
             validate_replay(args, argv)
-        options = dict(output="out", cache="cache.json", only=None, force=False,
-                       dry_run=False, replay=None, timeout=None, no_browser=False,
-                       commit="HEAD", jobs=os.cpu_count() or 1)
-        options.update(parameters(supplied))
+        defaults = add_arguments(ArgumentParser(add_help=False)).parse_args([])
+        options = parameters({**vars(defaults), **supplied})
         if type(options["jobs"]) is not int or options["jobs"] < 1:
             raise ValueError("jobs must be a positive integer")
-        timeout = options["timeout"]
-        if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
-            raise ValueError("timeout must be a finite positive number of seconds")
+        _validate_timeout(options["timeout"])
         return options
 
     def _artifacts(self, options: dict) -> list[_Output]:
@@ -307,13 +301,13 @@ class _Runner:
                         if any(set(tables) != set(fallback["pending"]) for tables in fallback.values()):
                             raise ValueError("error_rows must declare the same tables for every status")
                         plan.runs[key].fallback = fallback
+                        if not options["force"]:
+                            cached = store.cached(key, timeout=benchmark.timeout)
+                            plan.runs[key].selected = cached[-1] if cached else None
                     run = plan.runs[key]
                     reason = f"{artifact.id}/{name}"
                     if reason not in run.needed_by:
                         run.needed_by.append(reason)
-                    if not options["force"]:
-                        cached = store.cached(key, timeout=benchmark.timeout)
-                        run.selected = cached[-1] if cached else None
                     if key not in requirements:
                         requirements.append(key)
                 plan.requirements[artifact.id][name] = requirements

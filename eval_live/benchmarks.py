@@ -41,6 +41,12 @@ class ProcessInterrupted(KeyboardInterrupt):
         self.result = result
 
 
+def _validate_timeout(timeout):
+    """Accept no deadline or a finite, positive number of seconds."""
+    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("timeout must be None or a finite positive number")
+
+
 def run_command(argv: Sequence[str | Path], *, cwd: str | Path | None = None,
                 timeout: float | None = None, env: Mapping[str, str] | None = None,
                 check: bool = True) -> ProcessResult:
@@ -52,8 +58,7 @@ def run_command(argv: Sequence[str | Path], *, cwd: str | Path | None = None,
     timeouts raise ``ProcessError`` when ``check`` is true. Use
     ``RunContext.command`` to also persist this information automatically.
     """
-    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
-        raise ValueError("timeout must be None or a finite positive number")
+    _validate_timeout(timeout)
     args = tuple(os.fspath(value) for value in argv)
     if not args:
         raise ValueError("command must not be empty")
@@ -126,9 +131,7 @@ class Benchmark:
         if (not isinstance(self.name, str) or not self.name or not isinstance(self.version, str)
                 or not self.version):
             raise ValueError("benchmark name and version are required")
-        if self.timeout is not None and (type(self.timeout) not in (int, float)
-                or not math.isfinite(self.timeout) or self.timeout <= 0):
-            raise ValueError("timeout must be None or a finite positive number")
+        _validate_timeout(self.timeout)
         if not callable(self.error_rows):
             raise ValueError("error_rows must be a function returning named flat tables")
         if any(not isinstance(k, str) or not isinstance(v, str) for k, v in self.environment.items()):
