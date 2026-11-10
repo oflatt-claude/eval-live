@@ -44,6 +44,19 @@ def logged_collect(context):
     return collect(context)
 
 
+def collect_identifiers(context):
+    result = collect(context)
+    result["measurements"][0].update(invocation_id="workload experiment", config_id=7,
+                                      environment_id=None, process_id="workload process")
+    return result
+
+
+def abrupt_collect(context):
+    if context.config["crash"]:
+        os._exit(23)
+    return {"measurements": [{"value": 20, "payload": "x" * 262144}]}
+
+
 def slow(context):
     context.command([sys.executable, "-c", "import time; time.sleep(30)"])
     return {}
@@ -352,6 +365,33 @@ class EvaluationTests(unittest.TestCase):
         self.assertIn("diagnostic", self.stored()["eval_processes"][-1]["stdout"])
         self.assertEqual(len(self.stored()["measurements"]), 5)
 
+    def test_worker_crash_and_large_result_finish_without_leaking_worktrees(self):
+        before = self.git("worktree", "list", "--porcelain")
+        script = self.root / "crash.py"
+        script.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+            "import eval_live\nfrom test_evaluation import abrupt_collect, constant_table, error_rows\n"
+            "if __name__ == '__main__':\n"
+            "    reg = eval_live.Registry()\n"
+            f"    reg.benchmark('worker', abrupt_collect, version='1', repository={str(self.repo)!r}, "
+            "error_rows=error_rows, treatments=[{'crash': crash, 'parallel': True} for crash in (True, False)])\n"
+            "    reg.table('Counts', constant_table)\n"
+            f"    reg.run(args={{'output': {str(self.output)!r}, 'cache': {str(self.data)!r}, "
+            "'jobs': 2, 'no_browser': True}, argv=[])\n"
+        )
+        for expected in ("Collected 2; reused 0", "Collected 0; reused 2"):
+            result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(expected, result.stdout)
+            data = self.stored()
+            self.assertEqual([row["status"] for row in data["eval_runs"]], ["failure", "success"])
+            self.assertIn("without returning a result", data["eval_runs"][0]["error"])
+            rows = {row["run_id"]: row for row in data["measurements"]}
+            self.assertEqual(rows[data["eval_runs"][0]["run_id"]]["status"], "failure")
+            self.assertEqual(len(rows[data["eval_runs"][1]["run_id"]]["payload"]), 262144)
+            self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
+
     @unittest.skipUnless(os.name == "posix", "POSIX signal and process-group behavior")
     def test_parallel_interrupt_stops_commands_and_checkpoints_attempts(self):
         self.check_parallel_interrupt("interrupted_collect")
@@ -629,6 +669,35 @@ class EvaluationTests(unittest.TestCase):
             self.assertFalse((self.output / "results.json").exists())
             self.assertFalse((self.output / "reproduce.json").exists())
             self.assertTrue(self.data.exists())
+
+    def test_report_write_and_publication_errors_preserve_measurements_for_retry(self):
+        reg = self.evaluation()
+        self.run_eval(reg, render=True)
+        original_runs = self.stored()["eval_runs"]
+        replace = Path.replace
+
+        def fail_write(path, content):
+            if path.name == "results.json":
+                raise OSError("disk full")
+            return atomic_write(path, content)
+
+        def fail_publish(path, target):
+            if path.name == "values.tex":
+                raise OSError("publication failed")
+            return replace(path, target)
+
+        for failure in (patch("eval_live.render.atomic_write", side_effect=fail_write),
+                        patch.object(Path, "replace", fail_publish)):
+            with failure, self.assertRaises(OSError):
+                self.run_eval(reg, render=True)
+            self.assertEqual(list(self.output.iterdir()), [])
+            self.assertEqual(list(self.root.glob(".eval-live-*")), [])
+            self.assertEqual(self.stored()["eval_runs"], original_runs)
+            self.assertEqual(self.stored()["eval_invocations"][-1]["status"], "failure")
+            result = self.run_eval(reg, render=True)
+            self.assertEqual((result.collected, result.reused), (0, 1))
+            self.assertTrue((self.output / "reproduce.json").is_file())
+        self.assertEqual(len(CALLS), 1)
 
     def test_browser_rejects_unsafe_integers_without_corrupting_saved_data(self):
         from eval_live.render import write_html
@@ -965,9 +1034,15 @@ class EvaluationTests(unittest.TestCase):
         for token in ("0", "-1", "inf", "nan", "abc"):
             with patch("sys.stderr"), self.assertRaises(SystemExit):
                 parser.parse_args(["--timeout", token])
-        for deadline in (0, -1, float("inf"), float("nan"), True):
-            with self.assertRaises(ValueError):
-                self.run_eval(timeout=deadline)
+        for deadline in (0, -1, float("inf"), float("nan"), True, "1"):
+            with self.subTest(deadline=deadline):
+                with self.assertRaises(ValueError):
+                    self.run_eval(timeout=deadline)
+                with self.assertRaises(ValueError):
+                    eval_live.Benchmark("read", collect, "1", error_rows=error_rows, timeout=deadline)
+                with patch("eval_live.benchmarks.subprocess.Popen") as start, self.assertRaises(ValueError):
+                    eval_live.run_command([sys.executable, "-c", "pass"], timeout=deadline)
+                start.assert_not_called()
         self.assertFalse(self.output.exists())
 
     def test_generated_files_do_not_prevent_reuse(self):
@@ -1227,6 +1302,9 @@ class EvaluationTests(unittest.TestCase):
         try:
             os.chdir(self.root)
             result = reg.run(argv=[])
+            parser = eval_live.add_arguments(argparse.ArgumentParser())
+            reused = reg.run(args=parser.parse_args(["--no-browser"]), argv=["--no-browser"])
+            self.assertEqual((reused.collected, reused.reused), (0, 1))
         finally:
             os.chdir(previous)
         self.assertEqual(result.data_path, self.root / "cache.json")
@@ -1504,6 +1582,47 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(len(CALLS), 1)
         self.data.write_text(original)
 
+    def test_user_identifier_columns_survive_collection_export_and_replay(self):
+        benchmark = eval_live.Benchmark("read", collect_identifiers, "1", error_rows=error_rows)
+        reg = self.evaluation(benchmark=benchmark)
+        self.run_eval(reg, render=True)
+        self.assertEqual(self.run_eval(reg, render=True).reused, 1)
+        expected = self.stored()["measurements"]
+        self.assertEqual(expected[0]["invocation_id"], "workload experiment")
+        self.run_eval(reg, render=True, replay=True)
+        self.assertEqual(eval_live.Store(self.output / "results.json").data["measurements"], expected)
+        self.assertEqual(len(CALLS), 1)
+
+    def test_metadata_references_are_required_and_commands_match_their_process(self):
+        reg = self.evaluation(self.request(samples=2),
+                              benchmark=eval_live.Benchmark("read", logged_collect, "1", error_rows=error_rows))
+        self.run_eval(reg, render=True)
+        original = self.data.read_text()
+        outputs = {path.name: path.read_bytes() for path in self.output.iterdir()}
+        for table_name, field in (("eval_runs", "invocation_id"), ("eval_arguments", "invocation_id"),
+                                  ("eval_argv", "invocation_id"), ("eval_processes", "run_id"),
+                                  ("eval_commands", "run_id"), ("measurements", "run_id"),
+                                  ("eval_commands", "process_id")):
+            for missing in (True, False):
+                data = json.loads(original)
+                if missing:
+                    del data[table_name][0][field]
+                else:
+                    data[table_name][0][field] = "not-a-saved-identity"
+                invalid = json.dumps(data)
+                self.data.write_text(invalid)
+                with self.subTest(table=table_name, field=field, missing=missing), self.assertRaises(ValueError):
+                    self.run_eval(reg, render=True)
+                self.assertEqual(self.data.read_text(), invalid)
+                self.assertEqual({p.name: p.read_bytes() for p in self.output.iterdir()}, outputs)
+        data = json.loads(original)
+        data["eval_commands"][0]["run_id"] = data["eval_runs"][1]["run_id"]
+        self.data.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "different runs"):
+            self.run_eval(reg)
+        self.assertEqual(len(CALLS), 2)
+        self.data.write_text(original)
+
     def test_interrupt_records_process_and_attempt(self):
         before = self.git("worktree", "list", "--porcelain")
         outcome = ProcessResult(("worker",), str(self.repo), 0.1, -9, "partial stdout", "", "interrupted")
@@ -1747,11 +1866,45 @@ class StoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "data.json"
             path.write_text("original")
-            with patch("eval_live.store.os.replace", side_effect=OSError("disk problem")):
-                with self.assertRaises(OSError):
-                    atomic_write(path, "replacement")
-            self.assertEqual(path.read_text(), "original")
-            self.assertEqual(list(path.parent.iterdir()), [path])
+            for operation in ("fsync", "replace"):
+                for error in (OSError, KeyboardInterrupt):
+                    with self.subTest(operation=operation, error=error):
+                        with patch(f"eval_live.store.os.{operation}", side_effect=error), self.assertRaises(error):
+                            atomic_write(path, "replacement")
+                        self.assertEqual(path.read_text(), "original")
+                        self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_writer_lock_across_processes_and_reload_before_saving(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "cache.json"
+            store = eval_live.Store(path)
+            command = [sys.executable, "-c", "\n".join([
+                "import eval_live, sys",
+                "store = eval_live.Store(sys.argv[1])",
+                "try:",
+                "    with store.writer():",
+                "        store.data['from_child'] = []",
+                "        store.save()",
+                "except RuntimeError:",
+                "    print('locked')",
+                "else:",
+                "    print('saved')",
+            ]), str(path)]
+            with store.writer():
+                store.save()
+                result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=10)
+                self.assertEqual(result.stdout.strip(), "locked")
+                self.assertNotIn("from_child", eval_live.Store(path).data)
+            result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=10)
+            self.assertEqual(result.stdout.strip(), "saved")
+            self.assertNotIn("from_child", store.data)
+            with store.writer():
+                self.assertIn("from_child", store.data)
+                store.data["from_parent"] = []
+                store.save()
+            saved = eval_live.Store(path).data
+            self.assertIn("from_child", saved)
+            self.assertIn("from_parent", saved)
 
     def test_lock_schema_and_save_guard(self):
         with tempfile.TemporaryDirectory() as temporary:

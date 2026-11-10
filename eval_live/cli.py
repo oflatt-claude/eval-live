@@ -1,8 +1,9 @@
 """Shared CLI options for ordinary Python paper-evaluation scripts."""
 from argparse import ArgumentParser, ArgumentTypeError, Namespace
-import math
 import os
 from pathlib import Path
+
+from .benchmarks import _validate_timeout
 
 # All arguments are recorded; these do not identify individual measurements.
 OUTPUT_ARGUMENTS = frozenset({"output", "only", "replay", "no_browser"})
@@ -12,8 +13,10 @@ CONTROL_ARGUMENTS = OUTPUT_ARGUMENTS | {"cache", "commit", "force", "dry_run", "
 def positive_seconds(value: str) -> float:
     """Parse a finite, positive subprocess deadline in seconds."""
     result = float(value)
-    if not math.isfinite(result) or result <= 0:
-        raise ArgumentTypeError("must be a finite positive number of seconds")
+    try:
+        _validate_timeout(result)
+    except ValueError as error:
+        raise ArgumentTypeError("must be a finite positive number of seconds") from error
     return result
 
 

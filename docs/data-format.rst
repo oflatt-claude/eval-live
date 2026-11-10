@@ -4,6 +4,8 @@ Data format and provenance
 The data/cache file is one JSON object mapping names to lists of row objects.
 Every stored cell is a string, finite number, boolean, or null. Metadata uses
 reserved ``eval_`` names. User tables reference observations through ``run_id``.
+Only ``run_id`` is reserved in user rows; names such as ``invocation_id`` and
+``process_id`` are ordinary user columns, not metadata references.
 Do not put styled cells, lists, dictionaries, or serialized configuration
 objects in stored cells. Styled cells are allowed in derived presentation tables.
 
@@ -42,6 +44,8 @@ Rows and outcomes
 -----------------
 
 ``run_id`` links measurement rows to a treatment's configuration and commit.
+Metadata command rows must reference a process belonging to the same run.
+Missing or dangling references are rejected before collection or replay.
 Repeated or forced evaluations retain earlier attempts. The cache contains no
 per-output selections; those belong to the generated ``reproduce.json``.
 

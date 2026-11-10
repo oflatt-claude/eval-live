@@ -363,19 +363,19 @@ again on every input change; the Python runtime remains loaded.
 
 ## Tests
 
-Pure-JS unit + DOM-smoke tests, no npm/jsdom (they run the browser modules in a
-`node:vm` context with a tiny DOM shim):
+Run the Python and JavaScript tests:
 
 ```bash
 node test/state.test.mjs   # state core: filtering, reducers, typed selections
 node test/dom.test.mjs      # initEvalLive end-to-end: filter / collapse / checkbox / clear
 node test/graph-engine.test.mjs  # Pyodide conversion boundary: graphs / tables / narrowing
-python test/test_registry.py
 python -m unittest discover -s test -p 'test_*.py'
 ```
 
-The AlaSQL row-evaluation path and the actual Pyodide runtime are exercised in
-the browser; the engine unit test uses a small runtime stub.
+The JavaScript tests run the browser modules in a `node:vm` context with a small
+DOM shim; no npm packages are needed. The AlaSQL row-evaluation path and the
+actual Pyodide runtime are exercised in the browser; the engine unit test uses
+a small runtime stub.
 
 CI also builds the Python docs and runs the demo with real Pyodide in Chromium.
 To run that browser check locally after generating the default demo:

@@ -231,13 +231,14 @@ class Store:
             elif {identity for identity, _scope in groups} != invocations:
                 raise ValueError("invocation has no saved arguments")
         for table, rows in self.data.items():
-            for row in rows:
-                if "invocation_id" in row and row["invocation_id"] not in invocations:
-                    raise ValueError(f"dangling invocation in {table}")
-                if "run_id" in row and row["run_id"] not in runs:
-                    raise ValueError(f"dangling run in {table}")
-                if table not in SYSTEM_TABLES and "run_id" not in row:
-                    raise ValueError(f"missing run_id in {table}")
+            references = {}
+            if table in ("eval_argv", "eval_arguments", "eval_runs"):
+                references["invocation_id"] = invocations
+            if table not in SYSTEM_TABLES or table in ("eval_processes", "eval_commands"):
+                references["run_id"] = runs
+            for key, valid in references.items():
+                if any(row.get(key) not in valid for row in rows):
+                    raise ValueError(f"missing or dangling {key} in {table}")
         represented_runs = {row["run_id"] for name, rows in self.data.items()
                             if not name.startswith("eval_") for row in rows}
         for row in self.data["eval_runs"]:
@@ -263,9 +264,12 @@ class Store:
                                     config_id=row["config_id"], environment_id=row["environment_id"])
             if row["cache_key"] != digest(identity):
                 raise ValueError("cache identity does not match run provenance")
+        process_runs = {row["process_id"]: row["run_id"] for row in self.data["eval_processes"]}
         for row in self.data["eval_commands"]:
             if row["process_id"] not in processes:
                 raise ValueError("command has no process")
+            if row["run_id"] != process_runs[row["process_id"]]:
+                raise ValueError("command and process belong to different runs")
         for table, keys, position in (("eval_argv", ("invocation_id",), "position"),
                                       ("eval_commands", ("process_id",), "position")):
             groups = {}
