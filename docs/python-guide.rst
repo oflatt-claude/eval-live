@@ -13,7 +13,7 @@ tables, and macros. ``demo/eval.py`` is a complete single-script example:
    python demo/eval.py --only summary --sizes 500
    python demo/eval.py --samples 5             # a new CLI configuration
    python demo/eval.py --timeout 60            # opt into a 60-second command limit
-   python demo/eval.py --render-only --report demo/out/paper/reproduce.json \
+   python demo/eval.py --replay demo/out/paper \
        --output figures/replayed
 
 The demo creates a tiny local Git repository with two commits. No clone or
@@ -198,6 +198,19 @@ Repetitions are ordinary treatments. The script owns its repetition option:
        {"suite": suite, "sample": i}
        for suite in suites for i in range(args.samples)
    ])
+   reg.run(args=args, argv=tokens)
+
+Pass the parsed Namespace and original tokens to ``reg.run``. Replay rejects
+explicit collection parameters, even if their values equal the defaults.
+Register benchmarks and outputs in both modes, but put workload setup inside
+``if not args.replay:``. Check collection-only requirements such as a repository
+path there instead of making them required parser arguments. The egglog demo
+shows this pattern, so its saved reports can be replayed without the repository.
+
+``add_arguments(parser, output="out/paper")`` chooses ``out/cache.json`` as the
+default cache. ``cache="measurements.json"`` chooses a different default.
+CLI ``--output`` changes only the report destination; ``--cache`` changes the
+measurement cache. See :doc:`cli` for complete commands and path rules.
 
 ``sample`` is a user-defined treatment field. A callback can compute means, medians, or any
 other aggregate across the selected rows using ordinary Python.
@@ -358,7 +371,7 @@ Files are published only when rendering succeeds. Errors or Ctrl+C remove
 generated outputs and preserve the measurement database for another attempt.
 
 The interactive page shows derived Warnings and Errors tables. Messages update
-with filtered data; they are not appended to the raw tables. ``--render-only``
+with filtered data; they are not appended to the raw tables. ``--replay FOLDER``
 recomputes messages, so changing figure policy needs no new measurements.
 
 Replay
@@ -372,17 +385,17 @@ selected run IDs. Empty requirements remain empty.
 
 Requirement names and declared benchmark versions must match the saved
 selections. A mismatch fails before changing outputs. Selectors are not called
-during replay: to change the requirements or measurement arguments, run normally
-with ``--data``. This applies the usual cache identity and may collect missing
-measurements. The :doc:`cli` describes both modes and their options.
+during replay: to change the requirements or measurement arguments, run normally.
+This applies the usual cache identity and may collect missing measurements.
+The :doc:`cli` describes both modes and their options.
 
 Only measurement data is cached. Collection and rendering clear all files in
 the output directory, including unrecognized and hidden files. Subdirectories
 or symlinks cause an error before any deletion. Figures, tables, macros, and
 HTML are regenerated. Keep caches, source code, and replay inputs outside that
-directory. The default cache is ``cache.json``
-beside it. ``--data PATH`` shares a cache across output directories; use separate
-output directories to retain reports or run concurrent evaluations.
+directory. The default cache is chosen by :func:`eval_live.add_arguments` and
+stays fixed when ``--output`` changes. ``--cache PATH`` chooses another cache;
+use separate output directories to retain reports or run concurrent evaluations.
 Validation failures and ``--dry-run`` preserve the existing directory.
 
 ``run_tables(data)``, ``run_graphs(data)``, the terminal renderer, and
@@ -394,12 +407,12 @@ report bundle containing data and generation metadata.
 Export one figure and its data
 ------------------------------
 
-Combine ``--only`` with ``--output`` to generate a folder for one figure. Point
-``--data`` at the shared cache to reuse measurements:
+Combine ``--only`` with ``--output`` to generate a folder for one figure using
+the same measurement cache:
 
 .. code-block:: bash
 
-   python demo/eval.py --only runtime --data demo/out/cache.json --output figures/runtime
+   python demo/eval.py --only runtime --output figures/runtime
 
 The folder contains ``runtime.pdf``, ``index.html``, ``results.json``, and
 ``reproduce.json``. Only the figure's required measurements are collected, but
@@ -416,7 +429,7 @@ and its rendering dependencies, writing to a different output directory:
 
 .. code-block:: bash
 
-   python demo/eval.py --render-only --report figures/runtime/reproduce.json \
+   python demo/eval.py --replay figures/runtime \
        --output figures/replayed-runtime
 
 Replay leaves the source bundle unchanged. To replace the original figure

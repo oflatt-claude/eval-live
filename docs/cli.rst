@@ -1,96 +1,89 @@
 Command-line reference
 ======================
 
-These options are added to an evaluation script's ``argparse`` parser by
-:func:`eval_live.add_arguments`. Run ``python demo/eval.py --help`` to see these
-and the script's own options, such as ``--samples`` and ``--sizes``.
+:func:`eval_live.add_arguments` adds these options to an evaluation script's
+``argparse`` parser. Run ``python demo/eval.py --help`` to see them alongside
+script-specific parameters such as ``--samples`` and ``--sizes``. Spell option
+names in full.
 
-Collect and generate
---------------------
+Run an evaluation
+-----------------
 
-With no arguments, the script runs all declared outputs. It resolves their
-requirements, reuses matching measurements, collects missing treatments, and
-regenerates every selected figure, table, macro, and HTML page.
-
-After a successful run or replay, the HTML report opens in the default browser.
-Use ``--no-browser`` in CI or to save without opening it. If no browser is
-available, the CLI prints the report's location and still succeeds.
+With no arguments, the script generates all declared figures, tables, macros,
+and HTML. It reuses matching measurements, collects missing treatments, and
+opens the saved report in the default browser. ``--no-browser`` disables the
+browser launch; an unavailable browser does not fail the evaluation.
 
 .. code-block:: bash
 
    python demo/eval.py
-   python demo/eval.py --dry-run
-   python demo/eval.py --only runtime --data demo/out/cache.json --output figures/runtime
+   python demo/eval.py --only runtime --output figures/runtime
+   python demo/eval.py --only runtime --samples 5 --output figures/runtime
 
-The last command exports one figure with ``reproduce.json`` and
-``results.json``. Only that figure's required measurements are collected;
-the data export includes all previously collected attempts from its commits.
-See :doc:`data-format` for both JSON formats.
+The second command collects only the data needed by ``runtime`` and writes
+that figure with its HTML report, ``results.json``, and ``reproduce.json``.
+The third replaces it using five samples per configuration. Changing a
+measurement parameter changes cache identity; matching observations are reused
+and missing observations are collected. ``--force`` requests fresh observations.
+See :doc:`data-format` for the exported JSON formats.
 
-The output directory is disposable: all files, including hidden and
-unrecognized files, are cleared before collection or rendering starts.
-Subdirectories or symlinks cause an error before any deletion; inspect and
-clear them manually. Validation failures and ``--dry-run`` leave the directory
-untouched. A failed or interrupted run leaves no report, while collected
-measurements remain in the cache.
+Each run prints its selected output IDs, cache location, output directory, and
+collection/reuse counts. ``--dry-run`` shows the individual treatments, their
+cache status, and which outputs require them, without writing files. An unknown
+``--only`` ID produces an error listing the registered output IDs.
 
-The writable cache defaults to ``cache.json`` beside the output directory:
-``cache.json`` for ``--output out``, or ``demo/out/cache.json`` for the demo.
-``--data`` and replay inputs must be outside the output directory, including
-its subdirectories. Move any existing cache there before running. Output paths
-that would erase the working directory, home directory, a Git checkout root,
-or known source files are rejected. The output directory itself cannot be a
-symlink.
+Cache and output paths
+----------------------
 
-To replace that figure using new measurement arguments and the current cache:
+The cache location is independent of ``--output``. It defaults to ``cache.json``
+beside the script's declared default output directory, or to the ``cache=`` path
+supplied to :func:`eval_live.add_arguments`. For the demo it is always
+``demo/out/cache.json``, including when exporting to ``figures/runtime``.
+Use ``--cache FILE`` to choose another cache. Relative paths are resolved from
+the working directory.
 
-.. code-block:: bash
+The output directory is disposable: **all files**, including hidden and
+unrecognized files, are cleared before collection or rendering starts. This
+also applies when selecting one output with ``--only``. Use a separate output
+directory to retain the full report. Subdirectories or symlinks cause an error
+before any deletion; inspect and clear them manually. Validation failures and
+``--dry-run`` leave the directory untouched. A failed or interrupted run leaves
+no report, while collected measurements remain in the cache.
 
-   python demo/eval.py --only runtime --samples 5 --data demo/out/cache.json \
-       --output figures/runtime
+Caches, source files, and replay inputs must stay outside the output directory,
+including its subdirectories. Paths that would erase the working directory,
+home directory, a Git checkout root, or known source files are rejected. The
+output directory itself cannot be a symlink.
 
-The configuration changes the measurement identity. Matching data is reused;
-missing data is collected. The figure and report bundle replace the previous
-generated files in ``figures/runtime``. ``--force`` requests fresh observations
-even when matching data exists.
+Replay a saved report
+---------------------
 
-Replay bundled data
--------------------
-
-Keep ``reproduce.json`` and ``results.json`` in the same folder. Replay uses
-the current evaluation script with the exact run selections from that report:
-
-.. code-block:: bash
-
-   python demo/eval.py --render-only --report figures/runtime/reproduce.json \
-       --output figures/replayed-runtime
-
-To select one figure from a report containing several outputs, add
-``--only runtime``. An equivalent way to identify the input bundle is:
+Pass the folder containing both ``reproduce.json`` and ``results.json``:
 
 .. code-block:: bash
 
-   python demo/eval.py --render-only --data figures/runtime/results.json --only runtime \
-       --output figures/replayed-runtime
+   python demo/eval.py --replay figures/runtime --output figures/replayed-runtime
+   python demo/eval.py --replay demo/out/paper --only runtime --output figures/replayed-runtime
 
-Replay reads only the bundled data. It never opens the normal cache, collects
-measurements, or checks out code. The source bundle remains unchanged; a
-different output directory is required. Missing data, unknown output IDs,
+Replay uses the current rendering code with the exact run selections saved in
+the report. It reads only the bundle, never the normal cache, and neither
+collects measurements nor checks out code. The source folder remains unchanged;
+a different output directory is required. Missing data, unknown output IDs,
 changed requirement names, or incompatible benchmark versions fail before
 replacing outputs.
 
-Measurement arguments such as ``--samples`` or ``--commit`` do not change the
-recorded selections during replay. To apply new measurement arguments or
-selector functions, use a normal run instead. Figure callbacks always run
-again, so changes to rendering code take effect in either mode.
+Only ``--only``, ``--output``, and ``--no-browser`` may accompany ``--replay``.
+Explicit collection options, including ``--cache``, ``--commit``, ``--jobs``,
+``--timeout``, ``--force``, ``--dry-run``, and script-specific parameters such as
+``--samples``, are rejected. To change measurements or requirements, run normally.
+Figure callbacks run again in either mode.
 
-The data keeps the collecting script's commit and the workload commits.
-The new ``reproduce.json`` records the current script's commit for the generated
-figures, along with the actual replay arguments. Uncommitted changes in that
-script's checkout produce a warning.
+The data retains the collecting script's commit and workload commits. The new
+``reproduce.json`` records the current rendering script's commit and the replay
+invocation. Uncommitted changes in that script's checkout produce a warning.
 
-Shared options
---------------
+Options
+-------
 
 .. list-table::
    :header-rows: 1
@@ -99,31 +92,21 @@ Shared options
    * - Option
      - Behavior
    * - ``--output DIR``
-     - Dedicated directory whose files are cleared before running.
-       Subdirectories and symlinks are rejected. Defaults to ``out``; the demo
-       uses ``demo/out/paper``.
-   * - ``--data FILE``
-     - Measurement cache outside the output directory. Defaults to
-       ``cache.json`` beside that directory. In replay, accepts only the source
-       bundle's ``results.json``.
+     - Report directory whose files are cleared before running. Defaults to
+       ``out``; the demo uses ``demo/out/paper``. Does not move the cache.
    * - ``--only ID [ID ...]``
-     - Select output IDs. Defaults to all registered outputs for a normal run,
-       or all outputs recorded in the supplied report for replay.
+     - Select output IDs. Defaults to all registered outputs in a normal run,
+       or all outputs saved in the source report during replay.
+   * - ``--replay FOLDER``
+     - Render from that folder's ``reproduce.json`` and ``results.json``.
    * - ``--no-browser``
-     - Save the report without opening it in a browser. Does not affect
-       measurement cache identity.
-   * - ``--render-only``
-     - Replay a bundle. Requires ``--report`` or ``--data`` and a different
-       output directory. Cannot be combined with ``--force`` or ``--dry-run``.
-   * - ``--report FILE``
-     - The ``reproduce.json`` to replay. Requires ``--render-only``; data always
-       comes from the sibling ``results.json``.
+     - Save the report without opening it in a browser.
+   * - ``--cache FILE``
+     - Writable JSON measurement cache. Defaults to the path chosen by the
+       script when it creates its parser.
    * - ``--commit REF``
      - Default workload revision for treatments that omit ``commit``.
-       Defaults to ``HEAD``. Affects collection only.
-   * - ``--benchmarks NAME [NAME ...]``
-     - Allowed benchmarks for collection. An error is raised if an output
-       requires an excluded benchmark; it is not rendered with partial data.
+       Defaults to ``HEAD``.
    * - ``--jobs N``
      - Maximum simultaneous treatments marked ``parallel=True``. Defaults to
        CPU count; ``1`` runs sequentially. Unmarked treatments run alone.
@@ -135,11 +118,10 @@ Shared options
      - Collect fresh observations for the selected treatments, retaining
        previous attempts in the cache.
    * - ``--dry-run``
-     - Print the collection plan without collecting or changing any files.
+     - Print the detailed collection plan without collecting or changing files.
 
 All parsed arguments and defaults are recorded. Script-specific arguments
 affect measurement cache identity unless excluded through
 ``Registry(selection_arguments=...)``. ``--jobs`` also affects that identity.
 Output and selection controls do not affect measurement identity; timeout
-reuse follows the policy in :doc:`python-guide`. See that guide for declaring
-measurement parameters and recording external dependencies.
+reuse follows the policy in :doc:`python-guide`.

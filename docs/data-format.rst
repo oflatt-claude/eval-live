@@ -63,7 +63,7 @@ cache reuse when the deadline changes.
 
 ``eval_invocations.collection_complete`` records that all requested treatments
 finished, including those represented by timeout or failure rows. Rendering
-may still report errors. Render-only invocations are recorded in ``reproduce.json``
+may still report errors. Replay invocations are recorded in ``reproduce.json``
 and do not modify the measurement cache.
 
 Computed warning/error tables are rendering outputs and are never added to
@@ -76,11 +76,11 @@ Persistence
 ``Store`` validates scalar cells, schema version, identities, parameter
 encoding, provenance links, and cache fingerprints before collection.
 Incompatible data raises an error; it is never silently deleted or converted.
-For an older schema, use a new ``--data`` path for collection and the original
+For an older schema, use a new ``--cache`` path for collection and the original
 eval-live version to read the older file.
 The current repository identity is the canonical common Git-directory path,
 so another clone has a separate collection identity. Report selections remain
-portable for render-only use.
+portable for replay.
 
 Writes are atomic: readers see the complete previous or new snapshot. One
 writer holds a lock beside the cache file (``cache.json.lock`` by default);
@@ -92,7 +92,7 @@ Report bundle
 -------------
 
 ``results.json`` uses the cache schema above and is accepted by ``Store``
-and ``--data``. It contains every cached attempt for the repository/commit pairs
+and ``--cache``. It contains every cached attempt for the repository/commit pairs
 referenced by the report, including other configurations, treatments, data
 versions, environments, failures, and forced attempts. Associated measurement
 rows, command diagnostics, and collection provenance are included. Empty tables

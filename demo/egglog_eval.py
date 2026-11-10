@@ -81,14 +81,17 @@ def main(argv=None):
 
     parser = eval_live.add_arguments(argparse.ArgumentParser(description=__doc__),
                                      output=Path(__file__).resolve().parent / "out" / "egglog")
-    parser.add_argument("--repository", type=Path, required=True, help="Git repository containing egglog's Cargo workspace and .egg files")
-    parser.add_argument("--files", nargs="+", default=["egglog/tests/calc.egg"])
-    parser.add_argument("--modes", nargs="+", choices=["off", "proofs", "proof-testing"],
+    measurements = parser.add_argument_group('Egglog parameters (normal runs only)')
+    measurements.add_argument("--repository", type=Path, help="Git repository containing egglog's Cargo workspace and .egg files")
+    measurements.add_argument("--files", nargs="+", default=["egglog/tests/calc.egg"])
+    measurements.add_argument("--modes", nargs="+", choices=["off", "proofs", "proof-testing"],
                         default=["off", "proof-testing"])
-    parser.add_argument("--samples", type=int, default=3, help="repetitions per configuration")
-    parser.add_argument("--parallel", action="store_true", help="allow concurrent treatments, limited by --jobs")
+    measurements.add_argument("--samples", type=int, default=3, help="repetitions per configuration")
+    measurements.add_argument("--parallel", action="store_true", help="allow concurrent treatments, limited by --jobs")
     tokens = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(tokens)
+    if not args.replay and args.repository is None:
+        parser.error("--repository is required for collection")
     if args.samples < 1:
         parser.error("--samples must be positive")
     treatments = [
@@ -96,13 +99,12 @@ def main(argv=None):
         for file in args.files for mode in args.modes for sample in range(args.samples)
     ]
     reg.benchmark("egglog", measure, version="5", error_rows=error_rows, treatments=treatments,
-                  repository=args.repository, build=build, environment={"RUST_LOG": "error"})
+                  repository=args.repository or ".", build=build, environment={"RUST_LOG": "error"})
     try:
-        result = reg.run(args=args, argv=tokens)
+        reg.run(args=args, argv=tokens)
     except (ValueError, RuntimeError) as error:
         print(error, file=sys.stderr)
         return 1
-    print(f"Collected {result.collected}; reused {result.reused}. Data: {result.data_path}")
     return 0
 
 

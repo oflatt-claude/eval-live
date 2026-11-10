@@ -3,7 +3,7 @@
 Run: python -m unittest discover -s test -p 'test_evaluation.py'
 """
 import argparse
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import os
@@ -249,13 +249,13 @@ class EvaluationTests(unittest.TestCase):
         return registry
 
     def run_eval(self, evaluation=None, *, render=False, **options):
-        if options.get("render_only"):
+        if options.get("replay"):
             # Keep a separate input bundle so replay failures cannot remove it.
-            report = options.get("report") or self.copy_report()
+            source = self.copy_report().parent if options["replay"] is True else options["replay"]
             args = dict(output=self.output, **options)
-            args["report"] = report
+            args["replay"] = source
         else:
-            args = dict(output=self.output, data=self.data, **options)
+            args = dict(output=self.output, cache=self.data, **options)
         evaluation = evaluation or self.evaluation()
         if render:
             return evaluation.run(args=args, argv=["--test"])
@@ -375,7 +375,7 @@ class EvaluationTests(unittest.TestCase):
             f"    reg.benchmark('slow', {collector}, version='1', error_rows=error_rows, repository={str(self.repo)!r}, "
             f"treatments=[{{'case': str(i), 'parallel': True, 'pids': {str(pids)!r}}} for i in range(4)])\n"
             "    reg.table('Counts', constant_table)\n"
-            f"    reg.run(args={{'output': {str(self.output)!r}, 'jobs': 2}})\n"
+            f"    reg.run(args={{'output': {str(self.output)!r}, 'cache': {str(self.data)!r}, 'jobs': 2}})\n"
         )
         with subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
             try:
@@ -514,11 +514,11 @@ class EvaluationTests(unittest.TestCase):
         original = self.run_eval(reg, render=True)
         reg._benchmarks["read"]["benchmark"]["version"] = "seconds"
         with self.assertRaisesRegex(ValueError, "saved data version"):
-            self.run_eval(reg, render=True, render_only=True)
+            self.run_eval(reg, render=True, replay=True)
         self.assertEqual(self.stored()["eval_invocations"][-1]["invocation_id"], original.invocation_id)
         del reg._benchmarks["read"]
         with self.assertRaisesRegex(ValueError, "saved data version"):
-            self.run_eval(reg, render=True, render_only=True)
+            self.run_eval(reg, render=True, replay=True)
 
     def test_table_is_evaluated_once_for_files_and_console_on_every_run(self):
         RENDER_CALLS.clear()
@@ -696,7 +696,7 @@ class EvaluationTests(unittest.TestCase):
 
         reg.table("Current", table, id="current")
         reg.table("History", table, requires=history, id="history")
-        plan = reg.plan(args={"output": self.output})
+        plan = reg.plan(args={"output": self.output, "cache": self.data})
         self.assertEqual(len(plan.runs), 3)
         current = plan.requirements["current"]["data"]
         comparison = plan.requirements["history"]["data"]
@@ -723,7 +723,7 @@ class EvaluationTests(unittest.TestCase):
         reg.table("Default", table, requires=lambda ts: [
             {key: value for key, value in treatment.items() if key != "commit"} for treatment in ts
         ], id="default")
-        plan = reg.plan(args={"output": self.output})
+        plan = reg.plan(args={"output": self.output, "cache": self.data})
         self.assertEqual(len(plan.runs), 2)
         for output, commit in (("pinned", self.old), ("default", self.head)):
             key, = plan.requirements[output]["data"]
@@ -763,7 +763,7 @@ class EvaluationTests(unittest.TestCase):
             reg.benchmark("read", collect, version="1", repository=self.repo, treatments=[{"size": 10}], error_rows=error_rows)
             reg.table("Invalid", table, requires=selector, id='invalid')
             with self.assertRaisesRegex(ValueError, "invalid treatment selection for invalid/data"):
-                reg.plan(args={"output": self.output})
+                reg.plan(args={"output": self.output, "cache": self.data})
         self.assertFalse(self.output.exists())
         self.assertEqual(CALLS, [])
 
@@ -780,7 +780,7 @@ class EvaluationTests(unittest.TestCase):
 
         replay = eval_live.Registry()
         replay.table("Empty", empty_named_table, requires={"empty": unavailable}, id='empty')
-        self.run_eval(replay, render=True, render_only=True)
+        self.run_eval(replay, render=True, replay=True)
         self.assertEqual(self.stored()["eval_runs"], [])
         self.assertEqual(self.report()["selections"], {"empty": {"empty": []}})
 
@@ -804,9 +804,9 @@ class EvaluationTests(unittest.TestCase):
         reg.table("second", table, requires=self.request(factor=2), id='second')
         self.run_eval(self.evaluation(registry=reg), only=["second"])
         self.assertEqual([call[1] for call in CALLS], [{"factor": 2}])
-        with self.assertRaisesRegex(ValueError, "subset excludes"):
+        with self.assertRaisesRegex(ValueError, "unsupported options"):
             self.run_eval(benchmarks=[])
-        with self.assertRaisesRegex(ValueError, "unknown artifacts"):
+        with self.assertRaisesRegex(ValueError, "unknown output IDs: missing; available: values"):
             self.run_eval(only=["missing"])
         self.assertEqual(len(CALLS), 1)
 
@@ -828,7 +828,7 @@ class EvaluationTests(unittest.TestCase):
         reg = eval_live.Registry()
         reg.table("New label", table, requires=self.request(), id="renamed")
         with patch("eval_live.planning.render_artifacts", return_value=[]):
-            result = self.evaluation(registry=reg).run(args={"output": self.root / "elsewhere", "data": self.data}, argv=[])
+            result = self.evaluation(registry=reg).run(args={"output": self.root / "elsewhere", "cache": self.data}, argv=[])
         self.assertEqual(result.collected, 0)
 
     def test_commit_comparison_isolated_from_dirty_checkout(self):
@@ -952,7 +952,7 @@ class EvaluationTests(unittest.TestCase):
         original = json.dumps(data)
         self.data.write_text(original)
         report = (self.output / "index.html").read_bytes()
-        with self.assertRaisesRegex(ValueError, "unsupported schema version.*new --data path"):
+        with self.assertRaisesRegex(ValueError, "unsupported schema version.*new --cache path"):
             self.run_eval(render=True)
         self.assertEqual(self.data.read_text(), original)
         self.assertEqual((self.output / "index.html").read_bytes(), report)
@@ -980,12 +980,12 @@ class EvaluationTests(unittest.TestCase):
         reg.macros("Count", macros)
         self.assertEqual(self.run_eval(reg).collected, 3)
         self.assertTrue(all(run["status"] == "success" for run in self.stored()["eval_runs"]))
-        self.assertEqual(reg.plan(args={"output": self.output}).reused, 3)
+        self.assertEqual(reg.plan(args={"output": self.output, "cache": self.data}).reused, 3)
 
     def test_browser_callback_preflight_checks_only_selected_outputs(self):
         reg = self.evaluation()
         reg.table("Invalid", lambda data: [], id="invalid")
-        self.assertEqual(reg.plan(args={"output": self.output}).missing, 1)
+        self.assertEqual(reg.plan(args={"output": self.output, "cache": self.data}).missing, 1)
         with self.assertRaisesRegex(ValueError, "named top-level"):
             self.run_eval(reg)
         self.assertFalse(self.output.exists())
@@ -993,7 +993,7 @@ class EvaluationTests(unittest.TestCase):
         self.run_eval(reg, render=True, only=["values"])
         before = self.data.read_bytes()
         with self.assertRaisesRegex(ValueError, "named top-level"):
-            self.run_eval(reg, render_only=True, only=["values", "invalid"])
+            self.run_eval(reg, replay=True, only=["values", "invalid"])
         self.assertEqual(self.data.read_bytes(), before)
         self.assertTrue((self.output / "index.html").exists())
 
@@ -1010,14 +1010,14 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(CALLS, [])
         self.assertFalse(self.output.exists())
 
-    def test_render_only_interrupt_preserves_source_data(self):
+    def test_replay_interrupt_preserves_source_data(self):
         from dataclasses import replace
         reg = self.evaluation()
         self.run_eval(reg, render=True)
         before = self.data.read_bytes()
         reg._outputs[0] = replace(reg._outputs[0], render=interrupted_figure)
         with self.assertRaises(KeyboardInterrupt):
-            self.run_eval(reg, render=True, render_only=True)
+            self.run_eval(reg, render=True, replay=True)
         self.assertEqual(self.data.read_bytes(), before)
         self.assertFalse((self.output / "index.html").exists())
         self.assertEqual(len(CALLS), 1)
@@ -1071,11 +1071,11 @@ class EvaluationTests(unittest.TestCase):
             return embedded
 
         check_report(current, {self.head, self.old}, 3)
-        replay = self.run_eval(reg, render=True, render_only=True, only=["comparison"])
+        replay = self.run_eval(reg, render=True, replay=True, only=["comparison"])
         check_report(replay, {self.head, self.old}, 2)
-        replay = self.run_eval(reg, render=True, render_only=True)
+        replay = self.run_eval(reg, render=True, replay=True)
         check_report(replay, {self.head, self.old}, 2)
-        replay = self.run_eval(evaluation(self.request(samples=3)), render=True, render_only=True, report=original)
+        replay = self.run_eval(evaluation(self.request(samples=3)), render=True, replay=original.parent)
         self.assertEqual(len(eval_live.Store(self.output / "results.json").data["eval_runs"]), 3)
         self.assertEqual(self.report()["selections"], original_selections)
 
@@ -1086,7 +1086,7 @@ class EvaluationTests(unittest.TestCase):
         reg.graph("Plot", figure, requires=self.request(samples=1), id="plot")
         reg = self.evaluation(registry=reg)
         output = self.root / "one-figure"
-        result = reg.run(args={"output": output, "data": self.data, "only": ["plot"]}, argv=[])
+        result = reg.run(args={"output": output, "cache": self.data, "only": ["plot"]}, argv=[])
         self.assertEqual((result.collected, result.reused), (0, 1))
         self.assertEqual({path.name for path in result.written}, {"plot.pdf", "index.html", "results.json", "reproduce.json"})
         self.assertFalse((output / "table.tex").exists())
@@ -1094,7 +1094,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(subset["eval_runs"]), 3)
         self.assertEqual(len(self.stored()["eval_runs"]), 3)
         self.assertEqual(set(json.loads((output / "reproduce.json").read_text())["selections"]), {"plot"})
-        plan = reg.plan(args={"data": output / "results.json", "output": self.root / "planned",
+        plan = reg.plan(args={"cache": output / "results.json", "output": self.root / "planned",
                               "only": ["plot"]})
         self.assertEqual((plan.missing, plan.reused), (0, 1))
 
@@ -1109,8 +1109,7 @@ class EvaluationTests(unittest.TestCase):
         with patch("eval_live.targets.Target.resolve", side_effect=AssertionError("must not resolve Git")), \
                 patch("eval_live.planning._Runner._collect", side_effect=AssertionError("must not collect")), \
                 patch("eval_live.planning._Runner._choose", side_effect=AssertionError("must not run selectors")):
-            result = reg.run(args={"output": replayed, "data": copied, "only": ["plot"],
-                                   "render_only": True, "report": record}, argv=[])
+            result = reg.run(args={"output": replayed, "only": ["plot"], "replay": copied_folder}, argv=[])
         self.assertEqual((result.collected, result.reused), (0, 1))
         self.assertEqual(json.loads(copied.read_text()), subset)
         self.assertTrue((replayed / "plot.pdf").read_bytes().startswith(b"%PDF"))
@@ -1125,8 +1124,8 @@ class EvaluationTests(unittest.TestCase):
         before = {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()}
         for replay in (False, True):
             with self.assertRaisesRegex(ValueError, "protected input"):
-                reg.run(args={"output": self.output, "data": self.output / "results.json",
-                              "render_only": replay}, argv=[])
+                reg.run(args={"output": self.output,
+                              **({"replay": self.output} if replay else {"cache": self.output / "results.json"})}, argv=[])
             self.assertEqual(before, {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()})
         self.assertEqual(len(CALLS), 1)
 
@@ -1138,22 +1137,37 @@ class EvaluationTests(unittest.TestCase):
         source_bytes = source_data.read_bytes()
         self.run_eval(reg, force=True)
         for args in (
-            {"data": self.data},
-            {"data": self.data, "report": report},
-            {"report": report, "output": report.parent},
+            {"replay": self.data},
+            {"replay": report.parent, "cache": self.data},
+            {"replay": report.parent, "output": report.parent},
         ):
             with self.assertRaises(ValueError):
-                reg.run(args={"render_only": True, "output": self.root / "replayed", **args}, argv=[])
+                reg.run(args={"output": self.root / "replayed", **args}, argv=[])
         source_data.unlink()
         with self.assertRaisesRegex(ValueError, "missing report data"):
-            reg.run(args={"render_only": True, "report": report, "output": self.root / "replayed"}, argv=[])
+            reg.run(args={"replay": report.parent, "output": self.root / "replayed"}, argv=[])
         source_data.write_bytes(source_bytes)
         # Even a corrupt current cache cannot affect replay from the bundle.
         self.data.write_text("broken normal cache")
-        result = reg.run(args={"render_only": True, "report": report, "output": self.root / "replayed"}, argv=[])
+        result = reg.run(args={"replay": report.parent, "output": self.root / "replayed"}, argv=[])
         self.assertEqual(result.reused, 1)
         self.assertEqual(source_data.read_bytes(), source_bytes)
         self.assertEqual(self.data.read_text(), "broken normal cache")
+        self.assertEqual(len(CALLS), 2)
+
+    def test_replay_uses_the_requested_record_when_data_is_a_symlink(self):
+        reg = self.evaluation()
+        self.run_eval(reg, render=True)
+        record = self.copy_report()
+        original = self.report()["selections"]
+        self.run_eval(reg, render=True, force=True)
+        record.with_name("results.json").unlink()
+        record.with_name("results.json").symlink_to(self.output / "results.json")
+        destination = self.root / "replayed"
+        reg.run(args={"replay": record.parent, "output": destination}, argv=[])
+        replayed = json.loads((destination / "reproduce.json").read_text())
+        self.assertEqual(replayed["selections"], original)
+        self.assertNotEqual(replayed["selections"], self.report()["selections"])
         self.assertEqual(len(CALLS), 2)
 
     def test_output_must_not_contain_cache_or_replay_inputs(self):
@@ -1165,12 +1179,12 @@ class EvaluationTests(unittest.TestCase):
             nested_cache.parent.mkdir(parents=True, exist_ok=True)
             nested_cache.write_bytes(before)
             with self.assertRaisesRegex(ValueError, "protected input"):
-                reg.run(args={"output": self.output, "data": nested_cache}, argv=[])
+                reg.run(args={"output": self.output, "cache": nested_cache}, argv=[])
             self.assertEqual(nested_cache.read_bytes(), before)
             nested_cache.unlink()
         source = self.copy_report()
         with self.assertRaisesRegex(ValueError, "protected input"):
-            reg.run(args={"output": self.root, "report": source, "render_only": True}, argv=[])
+            reg.run(args={"output": self.root, "replay": source.parent}, argv=[])
         self.assertTrue(source.is_file())
         self.assertEqual(self.data.read_bytes(), before)
         self.assertEqual(len(CALLS), 1)
@@ -1184,7 +1198,7 @@ class EvaluationTests(unittest.TestCase):
         link = self.root / "linked-output"
         link.symlink_to(self.repo, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "symlink"):
-            self.evaluation().run(args={"output": link, "data": self.data}, argv=[])
+            self.evaluation().run(args={"output": link, "cache": self.data}, argv=[])
         self.assertEqual((self.repo / "value.txt").read_text(), "20")
 
         script = self.root / "script" / "eval.py"
@@ -1192,7 +1206,7 @@ class EvaluationTests(unittest.TestCase):
         script.write_text("def table(data): return data['measurements']\n")
         reg = self.evaluation(browser_source=script)
         with self.assertRaisesRegex(ValueError, "protected input"):
-            reg.run(args={"output": script.parent, "data": self.data}, argv=[])
+            reg.run(args={"output": script.parent, "cache": self.data}, argv=[])
         self.assertTrue(script.exists())
         self.assertEqual(CALLS, [])
 
@@ -1222,6 +1236,97 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result.collected, 1)
         self.browser.assert_called_once_with((self.root / "out" / "index.html").as_uri())
 
+    def test_cli_output_changes_reuse_the_declared_cache(self):
+        parser = eval_live.add_arguments(argparse.ArgumentParser(), output=self.output)
+        reg = self.evaluation()
+        for extra, expected in (([], (1, 0)),
+                                (["--output", str(self.root / "figures" / "values")], (0, 1)),
+                                (["--cache", str(self.root / "other.json")], (1, 0))):
+            tokens = ["--no-browser", *extra]
+            args = parser.parse_args(tokens)
+            result = reg.run(args=args, argv=tokens)
+            self.assertEqual((result.collected, result.reused), expected)
+            self.assertEqual(result.data_path, args.cache)
+        self.assertFalse((self.root / "figures" / "cache.json").exists())
+        self.assertEqual(len(CALLS), 2)
+        custom = eval_live.add_arguments(argparse.ArgumentParser(), output=self.output,
+                                         cache=self.root / "custom.json")
+        self.assertEqual(custom.parse_args(["--output", "elsewhere"]).cache, self.root / "custom.json")
+
+    def test_replay_rejects_explicit_collection_arguments_before_any_writes(self):
+        reg = self.evaluation()
+        self.run_eval(reg, render=True)
+        source = self.copy_report().parent
+        parser = eval_live.add_arguments(argparse.ArgumentParser(), output=self.output)
+        parser.add_argument("--samples", type=int, default=3)
+        parser.add_argument("--parallel", action="store_true")
+        before = {path.name: path.read_bytes() for path in self.output.iterdir()}
+        for extra in (["--commit", "HEAD"], ["--jobs", str(os.cpu_count() or 1)],
+                      ["--timeout=5"], ["--cache", str(self.data)], ["--force"],
+                      ["--dry-run"], ["--samples=3"], ["--parallel"]):
+            for tokens in ([*extra, "--replay", str(source)], ["--replay", str(source), *extra]):
+                with self.subTest(tokens=tokens), self.assertRaisesRegex(ValueError, "--replay accepts only"):
+                    reg.run(args=parser.parse_args(tokens), argv=tokens)
+                self.assertEqual(before, {path.name: path.read_bytes() for path in self.output.iterdir()})
+        for extra in ({"cache": self.data}, {"samples": 3}, {"commit": "HEAD"}, {"dry_run": True}):
+            with self.assertRaisesRegex(ValueError, "--replay accepts only"):
+                reg.run(args={"replay": source, "output": self.output, **extra}, argv=[])
+        self.assertEqual(len(CALLS), 1)
+
+        # Default collection options do not open the cache or affect saved selections.
+        self.data.write_text("unreadable normal cache")
+        destination = self.root / "replay with spaces"
+        tokens = [f"--replay={source}", "--output", str(destination), "--only", "values", "--no-browser"]
+        with patch("eval_live.targets.Target.resolve", side_effect=AssertionError("must not resolve Git")):
+            result = reg.run(args=parser.parse_args(tokens), argv=tokens)
+        self.assertEqual((result.collected, result.reused), (0, 1))
+        self.assertEqual(self.data.read_text(), "unreadable normal cache")
+        self.assertTrue((destination / "values.tex").is_file())
+
+    def test_normal_summary_is_brief_and_dry_run_includes_treatments(self):
+        reg = self.evaluation(self.request(samples=2))
+        with redirect_stdout(io.StringIO()) as output:
+            self.run_eval(reg)
+        self.assertIn("Outputs: values", output.getvalue())
+        self.assertIn(f"Cache: {self.data}", output.getvalue())
+        self.assertIn(f"Output: {self.output} (all files will be cleared)", output.getvalue())
+        self.assertIn("Collected 2; reused 0", output.getvalue())
+        self.assertNotIn("needed by", output.getvalue())
+        before = self.data.read_bytes()
+        report = (self.output / "reproduce.json").read_bytes()
+        with redirect_stdout(io.StringIO()) as output:
+            self.run_eval(reg, dry_run=True)
+        self.assertIn("needed by values/data", output.getvalue())
+        self.assertIn("dry run; unchanged", output.getvalue())
+        self.assertEqual(self.data.read_bytes(), before)
+        self.assertEqual((self.output / "reproduce.json").read_bytes(), report)
+
+    def test_egglog_demo_replays_without_collection_setup(self):
+        import runpy
+        script = Path(__file__).resolve().parents[1] / "demo" / "egglog_eval.py"
+        module = runpy.run_path(str(script))
+        reg = module["reg"]
+
+        def observations(context):
+            return {"timings": [{"file": "example.egg", "mode": "off", "sample": 0,
+                                 "seconds": 0.01, "status": "success"}],
+                    "phases": [{"phase": "run", "nanoseconds": 10, "status": "success"}],
+                    "rulesets": [{"status": "success"}]}
+
+        reg.benchmark("egglog", observations, version="5", error_rows=module["error_rows"],
+                      treatments=[{"file": "example.egg", "mode": "off", "sample": 0}], repository=self.repo)
+        self.run_eval(reg, render=True)
+        self.repo.rename(self.root / "removed-repository")
+        self.data.unlink()
+        replay = self.root / "replayed"
+        result = subprocess.run([sys.executable, str(script), "--replay", str(self.output),
+                                 "--output", str(replay), "--no-browser"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Collected 0; reused 1", result.stdout)
+        self.assertTrue((replay / "timings.tex").is_file())
+        self.assertFalse(self.data.exists())
+
     def test_browser_opens_after_publication_and_cache_unlock_including_replay(self):
         reg = self.evaluation()
 
@@ -1235,7 +1340,7 @@ class EvaluationTests(unittest.TestCase):
 
         self.browser.side_effect = opened
         self.run_eval(reg, render=True)
-        self.run_eval(reg, render=True, render_only=True)
+        self.run_eval(reg, render=True, replay=True)
         self.assertEqual(self.browser.call_count, 2)
 
     def test_no_browser_is_recorded_without_changing_cache_identity(self):
@@ -1291,7 +1396,7 @@ class EvaluationTests(unittest.TestCase):
         ):
             source.write_text(json.dumps({**original, **change}))
             with self.assertRaises(ValueError):
-                self.run_eval(reg, render=True, render_only=True, report=source)
+                self.run_eval(reg, render=True, replay=source.parent)
             self.assertEqual(before, {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()})
         self.assertEqual(len(CALLS), 1)
 
@@ -1333,7 +1438,7 @@ class EvaluationTests(unittest.TestCase):
         self.commit_value(30)
         rendering_commit = self.git("rev-parse", "HEAD")
         with patch("eval_live.targets.Target.resolve", side_effect=AssertionError("no workload lookup")):
-            self.run_eval(reg, render=True, render_only=True, report=source_report)
+            self.run_eval(reg, render=True, replay=source_report.parent)
         self.assertEqual(self.report()["invocation"]["script_commit"], rendering_commit)
         self.assertFalse(self.report()["invocation"]["script_dirty"])
         exported = eval_live.Store(self.output / "results.json").data
@@ -1348,7 +1453,7 @@ class EvaluationTests(unittest.TestCase):
         self.run_eval(reg, render=True)
         bundle = self.output / "results.json"
         expanded = self.evaluation(self.request(samples=3))
-        result = expanded.run(args={"data": bundle, "output": self.root / "expanded"}, argv=[])
+        result = expanded.run(args={"cache": bundle, "output": self.root / "expanded"}, argv=[])
         self.assertEqual((result.collected, result.reused), (0, 3))
         self.assertEqual(len(CALLS), 3)
 
@@ -1364,7 +1469,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(self.run_eval(evaluation).collected, 0)
         self.assertEqual(len(BUILDS), 1)
 
-    def test_force_preserves_history_and_render_only_uses_saved_selection_without_git(self):
+    def test_force_preserves_history_and_replay_uses_saved_selection_without_git(self):
         self.run_eval()
         original = self.copy_report()
         old_ids = {row["run_id"] for row in self.stored()["eval_runs"]}
@@ -1372,7 +1477,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(CALLS), 2)
         self.repo.rename(self.root / "moved")
         with patch("eval_live.targets.Target.resolve", side_effect=AssertionError("must not use Git")):
-            result = self.run_eval(render_only=True, report=original)
+            result = self.run_eval(replay=original.parent)
         ids = set(self.report()["selections"]["values"]["data"])
         self.assertEqual(ids, old_ids)
         self.assertEqual(result.collected, 0)
@@ -1466,7 +1571,7 @@ class EvaluationTests(unittest.TestCase):
 
     def test_registry_plan_and_invalid_registration_fail_before_collection(self):
         reg = self.evaluation()
-        plan = reg.plan(args={"output": self.output})
+        plan = reg.plan(args={"output": self.output, "cache": self.data})
         self.assertEqual(plan.missing, 1)
         self.assertFalse(self.output.exists())
         with self.assertRaisesRegex(ValueError, "duplicate benchmark"):
@@ -1496,7 +1601,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result.collected, 0)
         self.assertIn("No benchmark required", (self.output / "static-text.tex").read_text())
         self.assertEqual(self.stored()["eval_runs"], [])
-        self.run_eval(reg, render=True, render_only=True)
+        self.run_eval(reg, render=True, replay=True)
 
 
 class RegistryTests(unittest.TestCase):
